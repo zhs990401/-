@@ -1,0 +1,432 @@
+"""Conservative ledger reconciliation, using integer cents throughout."""
+from bisect import bisect_right
+from collections import Counter, defaultdict
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from itertools import combinations
+import re
+
+DEFAULT_FEE_KEYWORDS = '手续费,汇划费,结算费,账户管理费,网银服务费,银行工本费'
+GROUP_BUDGET = 200_000
+GROUP_CANDIDATES = 18
+
+
+def money(value):
+    text = str(value or '').strip().replace(',', '').replace('，', '').replace('￥', '').replace('¥', '').replace(' ', '')
+    if text in ('', '-', '—'):
+        return 0
+    if text.startswith('(') and text.endswith(')'):
+        text = '-' + text[1:-1]
+    try:
+        number = Decimal(text)
+        if not number.is_finite() or abs(number) > Decimal('999999999999'):
+            raise ValueError('金额超出允许范围')
+        if number * 100 != (number * 100).to_integral_value():
+            raise ValueError('金额超过两位小数，请确认币种及精度')
+        return int(number * 100)
+    except InvalidOperation:
+        raise ValueError('无法识别金额：' + text[:40]) from None
+
+
+def day(value):
+    text = str(value or '').strip()
+    if re.fullmatch(r'\d{8}', text):
+        return datetime.strptime(text, '%Y%m%d').date()
+    text = text.replace('年', '-').replace('月', '-').replace('日', '').replace('/', '-').replace('.', '-')
+    try:
+        return datetime.strptime(text[:10].split(' ')[0], '%Y-%m-%d').date()
+    except ValueError:
+        raise ValueError('日期无效，请使用完整年月日') from None
+
+
+def normalize(dataset, side):
+    rows, mapping = dataset['rows'], dataset['mapping']
+    if not mapping.get('date'):
+        raise ValueError('请选择日期列')
+    if mapping.get('mode') == 'signed':
+        if not mapping.get('amount'):
+            raise ValueError('请选择带正负号的金额列')
+        selected = [mapping['amount']]
+    else:
+        selected = [mapping.get('debit'), mapping.get('credit')]
+        if not any(selected):
+            raise ValueError('请至少选择一列借方/收入或贷方/支出金额')
+        if selected[0] and selected[0] == selected[1]:
+            raise ValueError('借方和贷方不能使用同一列')
+    optional = [mapping.get(k) for k in ('reference', 'description', 'currency', 'account', 'project', 'counterparty')]
+    if any(key and key not in dataset['headers'] for key in [mapping['date'], *selected, *optional]):
+        raise ValueError('字段映射不存在，请重新选择列')
+    valid, invalid = [], []
+    for number, cells in enumerate(rows, dataset.get('firstRow', 2)):
+        if not any(str(v or '').strip() for v in cells):
+            continue
+        values = dict(zip(dataset['headers'], cells))
+        get = lambda key: str(values.get(mapping.get(key), '') or '').strip()
+        record = {'side': side, 'row': number, 'date': get('date'), 'description': get('description'),
+                  'reference': get('reference'), 'currency': get('currency').upper() or 'CNY',
+                  'account': get('account'), 'amount': None, 'source': dataset.get('name', ''),
+                  'sheet': dataset.get('sheet', ''), 'datasetId': dataset.get('id', side),
+                  'project': get('project') if mapping.get('project') else str(dataset.get('projectName', '')).strip(),
+                  'counterparty': get('counterparty')}
+        try:
+            date_value = day(get('date'))
+            if mapping.get('mode') == 'signed':
+                if not get('amount'):
+                    raise ValueError('金额为空')
+                amount = money(get('amount'))
+            else:
+                debit, credit = money(get('debit')), money(get('credit'))
+                if debit and credit:
+                    raise ValueError('同一行借贷双方均有金额，请检查是否为汇总行')
+                amount = debit - credit
+            if amount == 0:
+                raise ValueError('金额为零或为空，请检查是否为余额/汇总行')
+            record.update(date=date_value.isoformat(), amount=amount)
+            valid.append(record)
+        except (ValueError, OverflowError) as exc:
+            invalid.append(item(record if side == 'left' else None, record if side == 'right' else None, str(exc)))
+    return valid, invalid
+
+
+def item(left, right, reason, **extra):
+    return {'left': left, 'right': right, 'reason': reason, **extra}
+
+
+def settings(options):
+    tolerance = int(options.get('days', 0))
+    if not 0 <= tolerance <= 31:
+        raise ValueError('日期容差必须在 0 至 31 天之间')
+    max_parts = int(options.get('maxParts', 5))
+    if not 2 <= max_parts <= 5:
+        raise ValueError('一笔对多笔的拆分上限必须在 2 至 5 笔之间')
+    keywords = [s.strip() for s in re.split(r'[,，;；\n]', str(options.get('feeKeywords', DEFAULT_FEE_KEYWORDS))) if s.strip()]
+    if len(keywords) > 30 or any(len(k) > 40 for k in keywords):
+        raise ValueError('手续费关键词最多 30 个，每个最多 40 字')
+    if options.get('separateFees') and not keywords:
+        raise ValueError('请填写至少一个手续费识别关键词')
+    return {**options, 'days': tolerance, 'direction': 'reverse' if options.get('direction') == 'reverse' else 'same',
+            'strictReference': bool(options.get('strictReference')), 'matchAccount': bool(options.get('matchAccount')),
+            'oneToMany': bool(options.get('oneToMany')), 'maxParts': max_parts,
+            'separateFees': bool(options.get('separateFees')), 'feeKeywords': ','.join(keywords)}
+
+
+def safe_total(records):
+    if sum(abs(r['amount']) for r in records) > 9_000_000_000_000_000:
+        raise ValueError('金额总量超出网页精确计算范围，请按项目或期间拆分')
+
+
+def aggregate(records):
+    if len(records) == 1:
+        return records[0]
+    return {**records[0], 'row': ','.join(str(r['row']) for r in records),
+            'date': ' ~ '.join(sorted({r['date'] for r in records})),
+            'description': ' / '.join(r['description'] for r in records),
+            'reference': ' / '.join(dict.fromkeys(r['reference'] for r in records if r['reference'])),
+            'source': ' / '.join(dict.fromkeys(r['source'] for r in records)),
+            'amount': sum(r['amount'] for r in records)}
+
+
+def group_search(left, right, remaining_l, remaining_r, options):
+    """Only unmatched, unambiguous rows enter bounded subset search.
+
+    Proposals from both directions are collected before accepting any, so shared
+    constituents never get consumed greedily. A budget failure accepts no groups.
+    """
+    factor = -1 if options['direction'] == 'reverse' else 1
+    limit, days, budget = options['maxParts'], options['days'], GROUP_BUDGET
+    blocked_l, blocked_r, proposals = set(), set(), set()
+
+    def meta(r, f, use_ref):
+        return (r['currency'], r['account'] if options['matchAccount'] else '',
+                1 if r['amount'] * f > 0 else -1, r['reference'] if use_ref else '')
+
+    def build_index(records, remaining, f, use_ref):
+        index = defaultdict(list)
+        for j in remaining:
+            r = records[j]
+            index[(meta(r, f, use_ref), r['date'])].append((abs(r['amount']), j))
+        for group in index.values():
+            group.sort()
+        return index
+
+    for source, target, remaining_s, remaining_t, sf, tf, is_left in (
+        (left, right, remaining_l, remaining_r, 1, factor, True),
+        (right, left, remaining_r, remaining_l, factor, 1, False),
+    ):
+        plain = build_index(target, remaining_t, tf, False)
+        references = build_index(target, remaining_t, tf, True)
+        for i in sorted(remaining_s):
+            r = source[i]
+            pools = []
+            ref_pools = []
+            for offset in range(-days, days + 1):
+                dt = (date.fromisoformat(r['date']) + timedelta(days=offset)).isoformat()
+                pools.append(plain.get((meta(r, sf, False), dt), []))
+                if r['reference']:
+                    ref_pools.append(references.get((meta(r, sf, True), dt), []))
+            if options['strictReference']:
+                pools = ref_pools
+            target_amount = abs(r['amount'])
+            candidates = []
+            for pool in pools:
+                # Constituents are strictly smaller than the anchor, same sign.
+                size = bisect_right(pool, (target_amount - 1, float('inf')))
+                if len(candidates) + size > GROUP_CANDIDATES:
+                    return [], set(remaining_l), set(remaining_r), '组合候选超过 18 条，本轮组合审核未自动配对；请缩小日期范围或按账户/参考号拆分'
+                candidates.extend(pool[:size])
+            solutions = []
+            for count in range(2, min(limit, len(candidates)) + 1):
+                for combo in combinations(candidates, count):
+                    budget -= 1
+                    if budget < 0:
+                        return [], set(remaining_l), set(remaining_r), '组合搜索达到计算上限，本轮组合审核未自动配对；请缩小期间或按账户/参考号拆分'
+                    if sum(value for value, _ in combo) == target_amount:
+                        solutions.append(tuple(sorted(j for _, j in combo)))
+                        if len(solutions) == 2:
+                            break
+                if len(solutions) == 2:
+                    break
+            if len(solutions) > 1:
+                (blocked_l if is_left else blocked_r).add(i)
+                (blocked_r if is_left else blocked_l).update(j for _, j in candidates)
+            elif solutions:
+                proposals.add(((i,), solutions[0]) if is_left else (solutions[0], (i,)))
+    usage_l, usage_r = Counter(), Counter()
+    for il, ir in proposals:
+        usage_l.update(il)
+        usage_r.update(ir)
+    accepted = []
+    for il, ir in sorted(proposals):
+        conflict = any(usage_l[i] != 1 or i in blocked_l for i in il) or any(usage_r[j] != 1 or j in blocked_r for j in ir)
+        if conflict:
+            blocked_l.update(il)
+            blocked_r.update(ir)
+    for il, ir in sorted(proposals):
+        if not any(i in blocked_l for i in il) and not any(j in blocked_r for j in ir):
+            accepted.append((il, ir))
+    return accepted, blocked_l, blocked_r, ''
+
+
+def compare_records(left, right, options):
+    """Compare one project pair / one category (normal or fee), preserving origin."""
+    factor = -1 if options['direction'] == 'reverse' else 1
+    tolerance, account, strict_ref = options['days'], options['matchAccount'], options['strictReference']
+    key = lambda r, f: (r['amount'] * f, r['currency'], r['account'] if account else '')
+
+    def candidates(source, target, source_factor, target_factor):
+        index, refs = defaultdict(list), defaultdict(list)
+        for j, r in enumerate(target):
+            index[(key(r, target_factor), r['date'])].append(j)
+            if r['reference']:
+                refs[(key(r, target_factor), r['date'], r['reference'])].append(j)
+        result = []
+        for r in source:
+            pool, ref_matches = [], []
+            for offset in range(-tolerance, tolerance + 1):
+                dt = (date.fromisoformat(r['date']) + timedelta(days=offset)).isoformat()
+                pool.extend(index.get((key(r, source_factor), dt), [])[:202])
+                if r['reference']:
+                    ref_matches.extend(refs.get((key(r, source_factor), dt, r['reference']), [])[:202])
+            result.append((ref_matches if strict_ref or ref_matches else pool)[:202])
+        return result
+
+    lc, rc = candidates(left, right, 1, factor), candidates(right, left, factor, 1)
+    matched, ambiguous, differences, warnings = [], [], [], []
+    used_l, used_r = set(), set()
+    for i, choices in enumerate(lc):
+        if len(choices) == 1 and rc[choices[0]] == [i]:
+            j = choices[0]
+            used_l.add(i)
+            used_r.add(j)
+            matched.append(item(left[i], right[j], '金额、币种和日期符合规则' + ('；参考号一致' if left[i]['reference'] and left[i]['reference'] == right[j]['reference'] else ''), delta=0, matchType='one_to_one'))
+    group_l, group_r, group_warning = set(), set(), ''
+    if options['oneToMany']:
+        remaining_l = {i for i in range(len(left)) if i not in used_l and not lc[i]}
+        remaining_r = {j for j in range(len(right)) if j not in used_r and not rc[j]}
+        groups, group_l, group_r, group_warning = group_search(left, right, remaining_l, remaining_r, options)
+        if group_warning:
+            warnings.append(group_warning)
+        for il, ir in groups:
+            a, b = [left[i] for i in il], [right[j] for j in ir]
+            used_l.update(il)
+            used_r.update(ir)
+            matched.append(item(aggregate(a), aggregate(b), f'一笔对多笔（左 {len(a)} 笔 ↔ 右 {len(b)} 笔），同方向合计一致',
+                                delta=0, matchType='one_to_many', leftRows=a, rightRows=b))
+    refs_l, refs_r = defaultdict(list), defaultdict(list)
+    for records, used, index in ((left, used_l, refs_l), (right, used_r, refs_r)):
+        for i, r in enumerate(records):
+            if i not in used and r['reference']:
+                index[(r['reference'], r['currency'], r['account'] if account else '')].append(i)
+    for reference in sorted(refs_l.keys() & refs_r.keys()):
+        if len(refs_l[reference]) == len(refs_r[reference]) == 1:
+            i, j = refs_l[reference][0], refs_r[reference][0]
+            if lc[i] or rc[j] or i in group_l or j in group_r:
+                continue
+            delta = left[i]['amount'] - right[j]['amount'] * factor
+            differences.append(item(left[i], right[j], '参考号一致，金额差异' if delta else '参考号一致，日期超出容差', delta=delta))
+            used_l.add(i)
+            used_r.add(j)
+    for side, records, used, candidate_list, group_ambiguous in (
+        ('left', left, used_l, lc, group_l), ('right', right, used_r, rc, group_r)
+    ):
+        for i, r in enumerate(records):
+            if i in used:
+                continue
+            a, b = (r, None) if side == 'left' else (None, r)
+            if candidate_list[i] or i in group_ambiguous:
+                reason = group_warning if i in group_ambiguous and group_warning else '存在重复或组合冲突，无法唯一配对，请人工复核'
+                ambiguous.append(item(a, b, reason))
+            else:
+                differences.append(item(a, b, '对侧未找到符合规则的记录（可能漏记、日期差异或金额差异）'))
+    return {'matched': matched, 'differences': differences, 'ambiguous': ambiguous, 'warnings': warnings}
+
+
+def currency_totals(left, right, factor):
+    totals = []
+    sums_l, sums_r = defaultdict(int), defaultdict(int)
+    for r in left:
+        sums_l[r['currency']] += r['amount']
+    for r in right:
+        sums_r[r['currency']] += r['amount']
+    for currency in sorted(sums_l.keys() | sums_r.keys()):
+        a, b = sums_l[currency], sums_r[currency]
+        totals.append({'currency': currency, 'left': a, 'right': b, 'delta': a - b * factor})
+    return totals
+
+
+def reconcile(payload):
+    options = settings(payload.get('options', {}))
+    for field, enabled in (('account', options['matchAccount']), ('reference', options['strictReference'])):
+        if enabled and not all(payload[s]['mapping'].get(field) for s in ('left', 'right')):
+            raise ValueError('按账户核对需要两侧选择账户列' if field == 'account' else '严格匹配参考号需要两侧选择参考号列')
+    left, bad_left = normalize(payload['left'], 'left')
+    right, bad_right = normalize(payload['right'], 'right')
+    safe_total(left + right)
+    if options['matchAccount']:
+        for records, invalid, side in ((left, bad_left, 'left'), (right, bad_right, 'right')):
+            invalid.extend(item(r if side == 'left' else None, r if side == 'right' else None, '按账户核对时账户不能为空') for r in records if not r['account'])
+            records[:] = [r for r in records if r['account']]
+    keywords = options['feeKeywords'].split(',') if options['separateFees'] else []
+    fee = lambda r: bool(keywords) and any(k in r['description'] for k in keywords)
+    normal_l, normal_r = [r for r in left if not fee(r)], [r for r in right if not fee(r)]
+    fees_l, fees_r = [r for r in left if fee(r)], [r for r in right if fee(r)]
+    report = compare_records(normal_l, normal_r, options)
+    report.update(invalid=bad_left + bad_right, fees=[], feeSummary=[], mode='bank')
+    fee_report = compare_records(fees_l, fees_r, options)
+    for status in ('matched', 'differences', 'ambiguous'):
+        for entry in fee_report[status]:
+            entry['feeStatus'] = status
+            if status == 'differences' and entry['right'] and not entry['left']:
+                entry['reason'] = '右侧疑似手续费，左侧未找到对应记录（疑似内账漏记）；' + entry['reason']
+            elif status == 'differences' and entry['left'] and not entry['right']:
+                entry['reason'] = '左侧疑似手续费，右侧未找到对应记录；' + entry['reason']
+            else:
+                entry['reason'] = '疑似手续费；' + entry['reason']
+            report['fees'].append(entry)
+    factor = -1 if options['direction'] == 'reverse' else 1
+    for total in currency_totals(fees_l, fees_r, factor):
+        currency = total['currency']
+        missing_r = [e['right'] for e in fee_report['differences'] if e['right'] and not e['left'] and e['right']['currency'] == currency]
+        missing_l = [e['left'] for e in fee_report['differences'] if e['left'] and not e['right'] and e['left']['currency'] == currency]
+        stats = {**total}
+        for prefix, rows in (('left', fees_l), ('right', fees_r), ('missingLeft', missing_r), ('missingRight', missing_l)):
+            selected = [r for r in rows if r['currency'] == currency]
+            stats[prefix + 'Count'] = len(selected)
+            stats[prefix + 'Expense'] = sum(-r['amount'] for r in selected if r['amount'] < 0)
+            stats[prefix + 'Refund'] = sum(r['amount'] for r in selected if r['amount'] > 0)
+        report['feeSummary'].append(stats)
+    report['warnings'].extend(fee_report['warnings'])
+    if options['separateFees']:
+        for side in ('left', 'right'):
+            if not payload[side]['mapping'].get('description'):
+                report['warnings'].append(('左侧' if side == 'left' else '右侧') + '未映射摘要，无法识别该侧手续费；请勿将零统计解读为没有手续费')
+    report.update(totals=currency_totals(left, right, factor), normalTotals=currency_totals(normal_l, normal_r, factor),
+                  counts={'left': len(left) + len(bad_left), 'right': len(right) + len(bad_right)}, options=options)
+    return report
+
+
+def project_aliases(aliases):
+    if not isinstance(aliases, dict) or len(aliases) > 200:
+        raise ValueError('项目名称对照最多 200 项')
+    aliases = {str(k).strip(): str(v).strip() for k, v in aliases.items()}
+    if any(not k or not v for k, v in aliases.items()):
+        raise ValueError('项目名称对照不能包含空名称')
+    def resolve(name):
+        visited = set()
+        while name in aliases and aliases[name] != name:
+            if name in visited:
+                raise ValueError('项目名称对照存在循环，请使用统一标准名称')
+            visited.add(name)
+            name = aliases[name]
+        return name
+    for name in aliases:
+        resolve(name)
+    return resolve
+
+
+def reconcile_projects(payload):
+    datasets = payload.get('datasets', [])
+    if not isinstance(datasets, list) or not 1 <= len(datasets) <= 20:
+        raise ValueError('请上传 1 至 20 份项目往来账（合并表可通过本方项目列区分）')
+    options = settings({**payload.get('options', {}), 'direction': 'reverse', 'separateFees': False, 'matchAccount': False})
+    resolve = project_aliases(payload.get('aliases', {}))
+    records, invalid, projects = [], [], set()
+    for d in datasets:
+        mapping = d['mapping']
+        if not mapping.get('counterparty'):
+            raise ValueError(f"{d.get('name', '项目文件')}：请选择对方项目列，不从摘要猜测往来对象")
+        if not mapping.get('project') and not str(d.get('projectName', '')).strip():
+            raise ValueError(f"{d.get('name', '项目文件')}：请填写本方项目名称，或选择本方项目列")
+        if options['strictReference'] and not mapping.get('reference'):
+            raise ValueError('严格匹配参考号需要每份项目往来账选择参考号列')
+        rows, bad = normalize(d, 'left')
+        invalid.extend(bad)
+        if not mapping.get('project'):
+            projects.add(resolve(str(d['projectName']).strip()))
+        else:
+            project_col = d['headers'].index(mapping['project'])
+            projects.update(resolve(str(row[project_col]).strip()) for row in d['rows'] if len(row) > project_col and str(row[project_col] or '').strip())
+        for r in rows:
+            r['originalProject'], r['originalCounterparty'] = r['project'], r['counterparty']
+            r['project'], r['counterparty'] = resolve(r['project']), resolve(r['counterparty'])
+            if not r['project'] or not r['counterparty'] or r['project'] == r['counterparty']:
+                invalid.append(item(r, None, '本方/对方项目为空，或双方项目名称相同'))
+            else:
+                records.append(r)
+    safe_total(records)
+    pairs = defaultdict(lambda: ([], []))
+    for r in records:
+        a, b = sorted((r['project'], r['counterparty']))
+        left, right = pairs[(a, b)]
+        r['side'] = 'left' if r['project'] == a else 'right'
+        (left if r['side'] == 'left' else right).append(r)
+    report = {key: [] for key in ('matched', 'differences', 'ambiguous', 'fees', 'feeSummary', 'totals', 'projectPairs', 'warnings')}
+    report.update(invalid=invalid, mode='projects', options=options, aliases=payload.get('aliases', {}), projects=sorted(projects),
+                  counts={'left': 0, 'right': 0, 'files': len(datasets), 'projects': len(projects), 'rows': len(records) + len(invalid)})
+    for (a, b), (left, right) in sorted(pairs.items()):
+        comparison = compare_records(left, right, options)
+        for kind in ('matched', 'differences', 'ambiguous'):
+            for entry in comparison[kind]:
+                entry['pair'] = f'{a} ↔ {b}'
+                if kind == 'differences' and (a not in projects or b not in projects):
+                    entry['reason'] = '对方项目账簿未提供；' + entry['reason']
+                report[kind].append(entry)
+        report['warnings'].extend(comparison['warnings'])
+        report['counts']['left'] += len(left)
+        report['counts']['right'] += len(right)
+        for total in currency_totals(left, right, -1):
+            currency = total['currency']
+            outstanding = sum(1 for kind in ('differences', 'ambiguous') for e in comparison[kind] if (e['left'] or e['right'])['currency'] == currency)
+            pair = {**total, 'projectA': a, 'projectB': b, 'leftCount': sum(r['currency'] == currency for r in left),
+                    'rightCount': sum(r['currency'] == currency for r in right), 'outstanding': outstanding,
+                    'missingProject': a if a not in projects else b if b not in projects else '',
+                    'status': '待核实' if outstanding or total['delta'] else '按规则一致'}
+            report['projectPairs'].append(pair)
+            report['totals'].append({**total, 'pairLabel': f'{a} ↔ {b}'})
+    missing = sorted({r['counterparty'] for r in records} - projects)
+    if missing:
+        report['warnings'].append('以下项目没有提供账簿：' + '、'.join(missing))
+    if len(projects) < 2:
+        report['warnings'].append('当前仅识别到不足两个本方项目，请补齐往来双方账簿')
+    report['warnings'] = list(dict.fromkeys(report['warnings']))
+    return report

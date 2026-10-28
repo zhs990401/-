@@ -1,0 +1,16 @@
+# Review the plan and settings in Render before creating the service.
+services:
+  - type: web
+    name: hengzhang
+    runtime: python
+    plan: free
+    buildCommand: pip install --no-cache-dir -r requirements-deploy.txt
+    startCommand: gunicorn --config gunicorn.conf.py 'webapp:create_app()'
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.14
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
