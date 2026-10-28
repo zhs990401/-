@@ -1,11 +1,11 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
-const state = {datasets: {left: null, right: null}, files: {}, projects: ['p1','p2'], projectNames: {}, nextId: 3, report: null, tab: 'differences', page: 0, busy: false, revision: 0};
+const state = {datasets: {left: null, right: null}, files: {}, projects: ['p1','p2'], projectNames: {}, nextId: 3, report: null, tab: 'differences', page: 0, busy: false, revision: 0, activeModule: null, views: {bank: {}, projects: {}}};
 const fields = {date:'日期 *', debit:'借方 / 收入金额', credit:'贷方 / 支出金额', amount:'带正负号的金额 *', reference:'参考号（凭证号 / 流水号）', description:'摘要（手续费识别依据）', currency:'币种（未选默认 CNY）', account:'账户', project:'本方项目列（可选，优先于填写名称）', counterparty:'对方项目列 *'};
 const tabNames = {differences:'待核实差异', ambiguous:'重复 / 冲突', invalid:'无效数据', matched:'已匹配', fees:'疑似手续费'};
 const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = n => n === null || n === undefined ? '—' : (n / 100).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
-const isProjects = () => $('#workflow').value === 'internal';
+const isProjects = () => state.activeModule === 'projects';
 const ids = () => isProjects() ? state.projects : ['left','right'];
 const ready = () => isProjects() ? state.projects.some(id=>state.datasets[id]) : !!state.datasets.left && !!state.datasets.right;
 function notice(message='') { $('#notice').textContent=message; $('#notice').classList.toggle('hidden',!message); }
@@ -26,6 +26,9 @@ function infer(headers) {
 function selectOptions(headers,value) { return '<option value="">请选择 / 不使用</option>'+headers.map(h=>`<option value="${esc(h)}" ${h===value?'selected':''}>${esc(h)}</option>`).join(''); }
 function configureWorkflow() {
   const projectMode=isProjects();
+  $('#bank-workflow').classList.toggle('hidden',projectMode);
+  $('#demo').classList.toggle('hidden',projectMode);
+  $('#project-demo').classList.toggle('hidden',!projectMode);
   $('#direction').disabled=projectMode;
   if(projectMode) $('#direction').value='reverse';
   $('#project-actions').classList.toggle('hidden',!projectMode);
@@ -157,7 +160,7 @@ $('#run').addEventListener('click',async()=>{
   } catch(error) {notice(error.message);}
   finally {state.busy=false;$('#run').disabled=!ready();$('#run').innerHTML='开始核对 <span>→</span>';}
 });
-$('#workflow').addEventListener('change',()=>{$('#direction').value=isProjects()?'reverse':'same';invalidate();renderUploads();});
+$('#workflow').addEventListener('change',()=>{invalidate();renderUploads();});
 ['#direction','#days','#strictReference','#matchAccount','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases'].forEach(id=>$(id).addEventListener('input',invalidate));
 $('#add-project').addEventListener('click',()=>{if(state.busy)return;if(addProject()){invalidate();renderUploads();}});
 $('#project-batch').addEventListener('change',async event=>{
@@ -204,6 +207,40 @@ $('#project-demo').addEventListener('click',()=>{
   demoDataset('p1','项目A往来.xlsx',headers,[['2026-01-05','项目B','拨付B项目','1000','','AB1'],['2026-01-06','项目C','拨付C项目','500','','AC1'],['2026-01-07','项目D','对方账簿未提供','80','','AD1']],'项目A');
   demoDataset('p2','项目B往来.xlsx',headers,[['2026-01-05','项目A','收到A第一笔','','600','AB1'],['2026-01-05','项目A','收到A第二笔','','400','AB1'],['2026-01-08','项目C','拨付C项目','200','','BC1']],'项目B');
   demoDataset('p3','项目C往来.xlsx',headers,[['2026-01-06','项目A','收到A项目','','490','AC1'],['2026-01-08','项目B','收到B项目','','200','BC1']],'项目C');
-  resetDemoOptions();$('#workflow').value='internal';$('#direction').value='reverse';invalidate();renderUploads();notice('虚构多项目示例：A↔B 一笔对两笔一致，A↔C 差 10 元，B↔C 一致，缺少 D 项目账簿。点击「开始核对」。');
+  resetDemoOptions();$('#direction').value='reverse';invalidate();renderUploads();notice('虚构多项目示例：A↔B 一笔对两笔一致，A↔C 差 10 元，B↔C 一致，缺少 D 项目账簿。点击「开始核对」。');
 });
-renderUploads();
+const RULE_IDS = ['#workflow','#direction','#days','#strictReference','#matchAccount','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases'];
+function saveView() {
+  if(!state.activeModule)return;
+  const controls={};
+  for(const id of RULE_IDS){const el=$(id);controls[id]=el.type==='checkbox'?el.checked:el.value;}
+  state.views[state.activeModule]={controls,report:state.report,tab:state.tab,page:state.page,search:$('#search').value,notice:$('#notice').textContent};
+}
+function activateModule(module, updateAddress=false) {
+  if(!['bank','projects'].includes(module))module='bank';
+  if(module===state.activeModule)return true;
+  if(state.busy){notice('正在处理明细，请稍候再切换功能。');return false;}
+  saveView();state.revision++;state.activeModule=module;
+  const view=state.views[module];
+  if(view.controls){
+    for(const [id,value] of Object.entries(view.controls)){const el=$(id);if(el.type==='checkbox')el.checked=value;else el.value=value;}
+  } else {
+    resetDemoOptions();$('#workflow').value='books';$('#direction').value=module==='projects'?'reverse':'same';
+    $('#feeKeywords').value='手续费,汇划费,结算费,账户管理费,网银服务费,银行工本费';
+  }
+  state.report=view.report||null;state.tab=view.tab||'differences';state.page=view.page||0;$('#search').value=view.search||'';
+  const title=module==='projects'?'项目往来核对':'银行资金内外账核对';
+  $('#feature-title').textContent=title;$('#breadcrumb-title').textContent=title;
+  $('#feature-eyebrow').textContent=module==='projects'?'INTERPROJECT RECONCILIATION':'BANK RECONCILIATION';
+  $('#feature-description').textContent=module==='projects'?'批量导入各项目往来账，核对互为对方的借贷记录，定位项目之间的差异。':'比较内外账银行资金收支，单独统计手续费，支持一笔对多笔审核。';
+  document.title=title+' · 中国港湾账目核对平台';
+  for(const el of document.querySelectorAll('[data-module]')){const active=el.dataset.module===module;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');}
+  $('#results').classList.add('hidden');renderUploads();if(state.report)renderReport();notice(view.notice||'');
+  if(updateAddress)history.pushState(null,'','#'+module);
+  window.scrollTo({top:0,behavior:'instant'});
+  return true;
+}
+for(const el of document.querySelectorAll('[data-module],.brand'))el.addEventListener('click',event=>{event.preventDefault();activateModule(el.dataset.module||'bank',true);});
+window.addEventListener('hashchange',()=>{if(!activateModule(location.hash.slice(1)))history.replaceState(null,'','#'+state.activeModule);});
+activateModule(location.hash==='#projects'?'projects':'bank');
+if(!['#projects','#bank'].includes(location.hash))history.replaceState(null,'','#'+state.activeModule);

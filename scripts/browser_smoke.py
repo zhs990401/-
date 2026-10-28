@@ -33,6 +33,10 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(os.environ.get('TEST_BASE_URL', 'http://127.0.0.1:8000'))
+    expect(page.locator('.brand-name')).to_have_text('中国港湾账目核对平台')
+    expect(page.locator('#nav-bank')).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#feature-title')).to_have_text('银行资金内外账核对')
+    expect(page.locator('#project-demo')).to_be_hidden()
     page.locator('#demo').click()
     page.locator('#run').click()
     expect(page.locator('#results')).to_be_visible()
@@ -57,6 +61,13 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     dest = Path(output)/'details.csv'
     info.value.save_as(dest)
     assert '材料付款第二笔' in dest.read_text(encoding='utf-8-sig')
+    # Each sidebar module retains its own rules, search, data and result.
+    page.locator('#search').fill('手续费')
+    page.locator('#nav-projects').click()
+    expect(page.locator('#feature-title')).to_have_text('项目往来核对')
+    expect(page.locator('#bank-workflow')).to_be_hidden()
+    expect(page.locator('#fee-rule')).to_be_hidden()
+    expect(page.locator('#results')).to_be_hidden()
     page.locator('#project-demo').click()
     page.locator('#run').click()
     expect(page.locator('#results')).to_be_visible()
@@ -71,6 +82,20 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     wb = openpyxl.load_workbook(dest)
     assert wb['项目往来汇总'].max_row == 5
     wb.close()
+    page.locator('#nav-bank').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents() == ['3','3','3','1','2']
+    expect(page.locator('#search')).to_have_value('手续费')
+    page.locator('#days').select_option('3')
+    expect(page.locator('#results')).to_be_hidden()
+    page.locator('#nav-projects').click()
+    expect(page.locator('#days')).to_have_value('0')
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents() == ['2','2','0','0']
+    page.locator('#nav-bank').click()
+    expect(page.locator('#days')).to_have_value('3')
+    expect(page.locator('#results')).to_be_hidden()
+    page.locator('#nav-projects').click()
     page.evaluate('window.scrollTo(0,0)')
     page.screenshot(path='/tmp/衡账-多项目核对.png', full_page=True)
     page.set_viewport_size({'width':390,'height':844})
@@ -80,7 +105,8 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
 
     # Actual multi-file XLSX upload, explicit project names, and missing project.
     page.reload()
-    page.locator('#workflow').select_option('internal')
+    expect(page.locator('#nav-projects')).to_have_attribute('aria-current', 'page')
+    page.locator('#nav-projects').click()
     headers = ['日期','对方项目','摘要','借方金额','贷方金额','参考号']
     a = xlsx(headers, [[datetime(2026,1,1),'项目B','拨付',1000,None,'AB']])
     b = xlsx(headers, [[datetime(2026,1,1),'项目A','第一笔',None,600,'AB'],[datetime(2026,1,1),'项目A','第二笔',None,400,'AB']])
@@ -96,7 +122,7 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
 
     # Combined sheet uses project-column mapping; aliases resolve both directions.
     page.reload()
-    page.locator('#workflow').select_option('internal')
+    page.locator('#nav-projects').click()
     combined=xlsx(['日期','本方项目','对方项目','借方金额','贷方金额','摘要'],[
         [datetime(2026,1,1),'甲','乙',100,None,'<script>保留为文本</script>'],
         [datetime(2026,1,1),'B','A',None,100,'反向']])
@@ -113,4 +139,4 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#results')).to_be_hidden()
     assert not errors, errors
     browser.close()
-    print('Browser checks passed: bank fee/refund stats, both demo reports, group members, full XLSX/CSV export, 3-file XLSX upload, combined project sheet, aliases, missing project warnings, HTML escaping, mobile layout, stale report invalidation; no JavaScript errors.')
+    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout; no JavaScript errors.')
