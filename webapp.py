@@ -13,7 +13,8 @@ from zipfile import BadZipFile
 
 import openpyxl
 import xlrd
-from reconcile import reconcile, reconcile_projects
+from reconcile import reconcile, reconcile_projects, reconcile_account
+from cashflow import calculate_cashflow, export_cashflow
 from server import ROOT, export_report, parse_file, validate_dataset
 
 MAX_REQUEST = 40 * 1024 * 1024
@@ -58,7 +59,7 @@ class OnlineApp:
         if not self.authorized(environ.get('HTTP_AUTHORIZATION', '')):
             return respond('401 Unauthorized', {'error': '请使用网站的访问账号和密码登录'}, extra=[('WWW-Authenticate', 'Basic realm="Ledger reconciliation", charset="UTF-8"')])
         if method == 'GET':
-            files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+            files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8')}
             if path not in files:
                 return respond('404 Not Found', {'error': '页面不存在'})
             filename, mime = files[path]
@@ -73,7 +74,7 @@ class OnlineApp:
                 return respond('403 Forbidden', {'error': '不允许跨站请求'})
         if environ.get('CONTENT_TYPE', '').split(';')[0] != 'application/json':
             return respond('415 Unsupported Media Type', {'error': '请求格式必须为 JSON'})
-        if path not in ('/api/parse', '/api/reconcile', '/api/projects', '/api/export'):
+        if path not in ('/api/parse', '/api/reconcile', '/api/projects', '/api/export', '/api/cashflow', '/api/cashflow/export'):
             return respond('404 Not Found', {'error': '接口不存在'})
         try:
             length = int(environ.get('CONTENT_LENGTH') or 0)
@@ -95,7 +96,16 @@ class OnlineApp:
             elif path == '/api/reconcile':
                 for side in ('left', 'right'):
                     validate_dataset(payload[side])
-                result = reconcile(payload)
+                result = reconcile_account(payload)
+            elif path == '/api/cashflow':
+                datasets = payload.get('datasets')
+                if not isinstance(datasets, list) or not 1 <= len(datasets) <= 20:
+                    raise ValueError('现金流统计支持 1 至 20 份流水')
+                for dataset in datasets:
+                    validate_dataset(dataset)
+                result = calculate_cashflow(payload)
+            elif path == '/api/cashflow/export':
+                return respond('200 OK', export_cashflow(payload), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             elif path == '/api/projects':
                 datasets = payload.get('datasets')
                 if not isinstance(datasets, list) or not 1 <= len(datasets) <= 20:

@@ -33,7 +33,7 @@ class HostingTests(unittest.TestCase):
                 create_app()
 
     def test_unauthenticated_and_bad_password_cannot_read_app_or_apis(self):
-        for path, method in [('/', 'GET'), ('/app.js', 'GET'), ('/api/reconcile', 'POST'), ('/api/projects', 'POST'), ('/api/export', 'POST')]:
+        for path, method in [('/', 'GET'), ('/app.js', 'GET'), ('/api/reconcile', 'POST'), ('/api/projects', 'POST'), ('/api/export', 'POST'), ('/api/cashflow', 'POST'), ('/api/cashflow/export', 'POST'), ('/cashflow.js', 'GET')]:
             result = self.call(path, method, {})
             self.assertTrue(result['status'].startswith('401'))
             self.assertIn('WWW-Authenticate', result['headers'])
@@ -65,8 +65,9 @@ class HostingTests(unittest.TestCase):
 
     def test_authenticated_reconciliation_runs_real_financial_engine(self):
         dataset = {'headers': ['日期', '借方', '贷方'], 'rows': [['2026-01-01', '100', '']],
+                   'accountName': '测试银行001',
                    'mapping': {'mode': 'split', 'date': '日期', 'debit': '借方', 'credit': '贷方'}}
-        result = self.call('/api/reconcile', 'POST', {'left': dataset, 'right': dataset}, HTTP_AUTHORIZATION=self.auth, HTTP_ORIGIN='https://example.test')
+        result = self.call('/api/reconcile', 'POST', {'left': dataset, 'right': dataset, 'options': {'accountScope': '测试银行001'}}, HTTP_AUTHORIZATION=self.auth, HTTP_ORIGIN='https://example.test')
         self.assertTrue(result['status'].startswith('200'))
         self.assertEqual(len(json.loads(result['body'])['matched']), 1)
         self.assertEqual(result['headers']['Cache-Control'], 'no-store')

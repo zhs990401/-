@@ -12,7 +12,8 @@ from zipfile import ZipFile, BadZipFile
 
 import openpyxl
 import xlrd
-from reconcile import reconcile, reconcile_projects
+from reconcile import reconcile, reconcile_projects, reconcile_account
+from cashflow import calculate_cashflow, export_cashflow
 
 ROOT = Path(__file__).parent / 'static'
 MAX_UPLOAD = 10 * 1024 * 1024
@@ -165,6 +166,7 @@ def export_report(report):
               ([p['currency']] + [p[k] if k.endswith('Count') else format_cents(p[k]) for k in fee_keys] for p in report.get('feeSummary', [])))
     add_sheet('资金净额汇总', ['项目组合', '币种', '左侧净额', '右侧净额', '规则调整后差额'],
               ([p.get('pairLabel', ''), p['currency'], format_cents(p['left']), format_cents(p['right']), format_cents(p['delta'])] for p in report.get('totals', [])))
+    add_sheet('账户范围说明', ['左右侧', '文件', '工作表', '原始行', '银行账户', '未纳入原因'], ([r.get(k, '') for k in ('side','source','sheet','row','account','reason')] for r in report.get('excludedAccounts', [])))
     add_sheet('核对规则与提示', ['规则', '内容'], [[k, str(v)] for k, v in report['options'].items()] + [['项目名称对照', json.dumps(report.get('aliases', {}), ensure_ascii=False)]] + [['提示', w] for w in report.get('warnings', [])] + [['核对范围', '仅比较本次导入的发生额，不包含未导入的期初余额；疑似手续费需人工确认；一笔对多笔在唯一一对一匹配之后进行。']])
     output = BytesIO()
     workbook.save(output)
@@ -195,7 +197,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+        files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8')}
         if path == '/api/health':
             return self.send(200, {'status': 'ok'})
         if path not in files:
@@ -219,7 +221,16 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/reconcile':
                 for side in ('left', 'right'):
                     validate_dataset(payload[side])
-                return self.send(200, reconcile(payload))
+                return self.send(200, reconcile_account(payload))
+            if self.path == '/api/cashflow':
+                datasets = payload.get('datasets')
+                if not isinstance(datasets, list) or not 1 <= len(datasets) <= 20:
+                    raise ValueError('现金流统计支持 1 至 20 份流水')
+                for dataset in datasets:
+                    validate_dataset(dataset)
+                return self.send(200, calculate_cashflow(payload))
+            if self.path == '/api/cashflow/export':
+                return self.send(200, export_cashflow(payload), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             if self.path == '/api/projects':
                 datasets = payload.get('datasets')
                 if not isinstance(datasets, list) or not 1 <= len(datasets) <= 20:

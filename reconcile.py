@@ -57,14 +57,15 @@ def normalize(dataset, side):
     if any(key and key not in dataset['headers'] for key in [mapping['date'], *selected, *optional]):
         raise ValueError('字段映射不存在，请重新选择列')
     valid, invalid = [], []
-    for number, cells in enumerate(rows, dataset.get('firstRow', 2)):
+    for offset, cells in enumerate(rows):
+        number = dataset['rowNumbers'][offset] if 'rowNumbers' in dataset else offset + dataset.get('firstRow', 2)
         if not any(str(v or '').strip() for v in cells):
             continue
         values = dict(zip(dataset['headers'], cells))
         get = lambda key: str(values.get(mapping.get(key), '') or '').strip()
         record = {'side': side, 'row': number, 'date': get('date'), 'description': get('description'),
                   'reference': get('reference'), 'currency': get('currency').upper() or 'CNY',
-                  'account': get('account'), 'amount': None, 'source': dataset.get('name', ''),
+                  'account': get('account') if mapping.get('account') else str(dataset.get('accountName', '')).strip(), 'amount': None, 'source': dataset.get('name', ''),
                   'sheet': dataset.get('sheet', ''), 'datasetId': dataset.get('id', side),
                   'project': get('project') if mapping.get('project') else str(dataset.get('projectName', '')).strip(),
                   'counterparty': get('counterparty')}
@@ -297,7 +298,7 @@ def currency_totals(left, right, factor):
 def reconcile(payload):
     options = settings(payload.get('options', {}))
     for field, enabled in (('account', options['matchAccount']), ('reference', options['strictReference'])):
-        if enabled and not all(payload[s]['mapping'].get(field) for s in ('left', 'right')):
+        if enabled and not all(payload[s]['mapping'].get(field) or (field == 'account' and str(payload[s].get('accountName', '')).strip()) for s in ('left', 'right')):
             raise ValueError('按账户核对需要两侧选择账户列' if field == 'account' else '严格匹配参考号需要两侧选择参考号列')
     left, bad_left = normalize(payload['left'], 'left')
     right, bad_right = normalize(payload['right'], 'right')
@@ -342,6 +343,47 @@ def reconcile(payload):
                 report['warnings'].append(('左侧' if side == 'left' else '右侧') + '未映射摘要，无法识别该侧手续费；请勿将零统计解读为没有手续费')
     report.update(totals=currency_totals(left, right, factor), normalTotals=currency_totals(normal_l, normal_r, factor),
                   counts={'left': len(left) + len(bad_left), 'right': len(right) + len(bad_right)}, options=options)
+    return report
+
+
+def reconcile_account(payload):
+    """Public bank workflow: one explicitly selected bank account at a time."""
+    scope = str(payload.get('options', {}).get('accountScope', '')).strip()
+    if not scope:
+        raise ValueError('请选择本次核对的银行账户；银行资金必须逐个账户核对')
+    selected = {'options': {**payload.get('options', {}), 'matchAccount': True, 'accountScope': scope}}
+    exclusions, scoped_counts = [], {}
+    for side in ('left', 'right'):
+        d = payload[side]
+        column = d['mapping'].get('account')
+        if column and column not in d['headers']:
+            raise ValueError('账户列不存在，请重新映射')
+        fixed = str(d.get('accountName', '')).strip()
+        if not column and not fixed:
+            raise ValueError(('左侧' if side == 'left' else '右侧') + '需要映射银行账户列，或填写本文件所属银行账户')
+        index = d['headers'].index(column) if column else None
+        rows, numbers = [], []
+        for offset, cells in enumerate(d['rows']):
+            if not any(str(v or '').strip() for v in cells):
+                continue
+            account = str(cells[index] or '').strip() if index is not None and index < len(cells) else '' if column else fixed
+            number = offset + d.get('firstRow', 2)
+            if account == scope:
+                rows.append(cells)
+                numbers.append(number)
+            else:
+                exclusions.append({'side': side, 'source': d.get('name', ''), 'sheet': d.get('sheet', ''), 'row': number, 'account': account,
+                                   'reason': '其他银行账户，未纳入本次核对' if account else '缺少银行账户，未纳入；请补充账户归属'})
+        selected[side] = {**d, 'rows': rows, 'rowNumbers': numbers}
+        scoped_counts[side] = len(rows)
+    if not sum(scoped_counts.values()):
+        raise ValueError('两侧均未找到选定银行账户，请检查账户名称或账号是否一致')
+    report = reconcile(selected)
+    report['accountScope'] = scope
+    report['excludedAccounts'] = exclusions
+    missing = sum(not r['account'] for r in exclusions)
+    if exclusions:
+        report['warnings'].append(f'本次仅核对账户 {scope}；其他账户 {len(exclusions) - missing} 条、缺少账户 {missing} 条未参与，请在导出报告的账户范围说明中查看')
     return report
 
 
