@@ -227,6 +227,14 @@ def group_search(left, right, remaining_l, remaining_r, options):
     return accepted, blocked_l, blocked_r, ''
 
 
+def payment_codes(record):
+    """Explicit PC payment identifiers, including PC1797&1809 lists."""
+    codes = set()
+    for match in re.finditer(r'(?<![A-Z0-9])PC\s*[-:#]?\s*(\d{3,}(?:\s*[&＋+,]\s*(?:PC\s*)?\d{3,})*)(?![A-Z0-9])', record.get('description', '').upper()):
+        codes.update(re.findall(r'\d+', match.group(1)))
+    return tuple(sorted(codes))
+
+
 def compare_records(left, right, options):
     """Compare one project pair / one category (normal or fee), preserving origin."""
     factor = -1 if options['direction'] == 'reverse' else 1
@@ -234,20 +242,26 @@ def compare_records(left, right, options):
     key = lambda r, f: (r['amount'] * f, r['currency'], r['account'] if account else '')
 
     def candidates(source, target, source_factor, target_factor):
-        index, refs = defaultdict(list), defaultdict(list)
+        index, refs, payments = defaultdict(list), defaultdict(list), defaultdict(list)
         for j, r in enumerate(target):
+            codes = payment_codes(r)
             index[(key(r, target_factor), '' if tolerance == 'unlimited' else r['date'])].append(j)
             if r['reference']:
                 refs[(key(r, target_factor), '' if tolerance == 'unlimited' else r['date'], r['reference'])].append(j)
+            if codes:
+                payments[(key(r, target_factor), '' if tolerance == 'unlimited' else r['date'], codes)].append(j)
         result = []
         for r in source:
-            pool, ref_matches = [], []
+            codes = payment_codes(r)
+            pool, ref_matches, payment_matches = [], [], []
             dates = [''] if tolerance == 'unlimited' else [(date.fromisoformat(r['date']) + timedelta(days=offset)).isoformat() for offset in range(-tolerance,tolerance+1)]
             for dt in dates:
                 pool.extend(index.get((key(r, source_factor), dt), [])[:202])
                 if r['reference']:
                     ref_matches.extend(refs.get((key(r, source_factor), dt, r['reference']), [])[:202])
-            result.append((ref_matches if strict_ref or ref_matches else pool)[:202])
+                if codes:
+                    payment_matches.extend(payments.get((key(r, source_factor), dt, codes), [])[:202])
+            result.append((ref_matches if strict_ref or ref_matches else payment_matches or pool)[:202])
         return result
 
     lc, rc = candidates(left, right, 1, factor), candidates(right, left, factor, 1)
@@ -258,7 +272,7 @@ def compare_records(left, right, options):
             j = choices[0]
             used_l.add(i)
             used_r.add(j)
-            matched.append(item(left[i], right[j], ('金额、币种符合规则；日期无限制' if tolerance == 'unlimited' else '金额、币种和日期符合规则') + ('；参考号一致' if left[i]['reference'] and left[i]['reference'] == right[j]['reference'] else ''), delta=0, matchType='one_to_one'))
+            matched.append(item(left[i], right[j], ('金额、币种符合规则；日期无限制' if tolerance == 'unlimited' else '金额、币种和日期符合规则') + ('；参考号一致' if left[i]['reference'] and left[i]['reference'] == right[j]['reference'] else '') + ('；摘要 PC 付款编号一致' if payment_codes(left[i]) and payment_codes(left[i]) == payment_codes(right[j]) else ''), delta=0, matchType='one_to_one'))
     count_l,count_r,count_checks,deferred={},{},[],[]
     if options['matchDuplicateCounts']:
         from duplicate_counts import match_duplicate_counts
