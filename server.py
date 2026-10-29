@@ -6,6 +6,7 @@ from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO, StringIO
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 from zipfile import ZipFile, BadZipFile
@@ -14,6 +15,7 @@ import openpyxl
 import xlrd
 from reconcile import reconcile, reconcile_projects, reconcile_account
 from cashflow import calculate_cashflow, export_cashflow
+from project_import import project_template
 
 ROOT = Path(__file__).parent / 'static'
 MAX_UPLOAD = 10 * 1024 * 1024
@@ -48,7 +50,7 @@ def parse_file(payload):
         workbook = openpyxl.load_workbook(BytesIO(content), read_only=True, data_only=False)
         try:
             sheets = workbook.sheetnames
-            sheet = workbook[payload.get('sheet') or sheets[0]]
+            sheet = workbook[payload.get('sheet') or (next((s for s in sheets if '明细' in s and '余额' not in s), sheets[0]) if payload.get('autoHeader') else sheets[0])]
             rows = []
             for row in sheet.iter_rows():
                 if len(rows) >= MAX_ROWS + 50:
@@ -63,7 +65,7 @@ def parse_file(payload):
         workbook = xlrd.open_workbook(file_contents=content, on_demand=True)
         try:
             sheets = workbook.sheet_names()
-            sheet = workbook.sheet_by_name(payload.get('sheet') or sheets[0])
+            sheet = workbook.sheet_by_name(payload.get('sheet') or (next((s for s in sheets if '明细' in s and '余额' not in s), sheets[0]) if payload.get('autoHeader') else sheets[0]))
             if sheet.nrows > MAX_ROWS + 50 or sheet.ncols > 100:
                 raise ValueError('文件超过 30,000 条明细或 100 列，请拆分文件')
             rows = [[cell(xlrd.xldate_as_datetime(c.value, workbook.datemode)) if c.ctype == xlrd.XL_CELL_DATE else cell(c.value) for c in sheet.row(i)] for i in range(sheet.nrows)]
@@ -85,6 +87,16 @@ def parse_file(payload):
             rows.append(row)
     else:
         raise ValueError('仅支持 .xlsx、.xls 和 .csv 文件')
+    if payload.get('autoHeader') and 'headerRow' not in payload:
+        best = (0, 1)
+        for i, candidate in enumerate(rows[:50]):
+            names = [re.sub(r'\s+', '', str(v)) for v in candidate]
+            has_date = any(n in ('日期','记账日期','业务日期','交易日期','发生日期') for n in names)
+            has_amount = any(('借方' in n or '贷方' in n or n in ('原币金额','原币发生额','外币金额','外币发生额')) and '余额' not in n for n in names)
+            score = int(has_date)*3 + int(has_amount)*3 + sum(any(term in n for term in ('对方项目','往来单位','币种','凭证号')) for n in names)
+            if has_date and has_amount and score > best[0]:
+                best = score, i+1
+        header_row = best[1]
     if len(rows) < header_row:
         raise ValueError('文件中不存在该表头行')
     headers = [str(v).strip() or f'未命名列{i + 1}' for i, v in enumerate(rows[header_row - 1])]
@@ -101,7 +113,7 @@ def parse_file(payload):
     if len(data) > MAX_ROWS:
         raise ValueError('超过 30,000 条明细，请拆分文件')
     return {'headers': headers, 'rows': data, 'firstRow': header_row + 1, 'sheets': sheets,
-            'sheet': payload.get('sheet') or (sheets[0] if sheets else ''),
+            'sheet': (sheet.title if suffix == '.xlsx' else sheet.name if suffix == '.xls' else ''),
             'warnings': ([f'发现 {formula_count} 个公式单元格。公式不会被执行；用于核对的日期和金额列应先在 Excel 中粘贴为值。'] if formula_count else [])}
 
 
@@ -142,30 +154,32 @@ def export_report(report):
         for c in ws[1]:
             ws.column_dimensions[c.column_letter].width = min(48, max(14, len(str(c.value)) * 2 + 2))
 
-    record_headers = ['文件', '工作表', '原始行', '本方项目', '对方项目', '日期', '摘要', '参考号', '账户', '币种', '金额', '原本方名称', '原对方名称']
+    record_headers = ['文件', '工作表', '原始行', '本方项目', '对方项目', '日期', '摘要', '参考号', '账户', '币种', '金额', '原本方名称', '原对方名称', '科目编码', '科目名称', '本币币种', '本币金额', '本币说明']
 
     def record_values(record):
         if not record:
             return [''] * len(record_headers)
         amount = record.get('amount')
-        return [record.get(k, '') for k in ('source', 'sheet', 'row', 'project', 'counterparty', 'date', 'description', 'reference', 'account', 'currency')] + [format_cents(amount), record.get('originalProject', ''), record.get('originalCounterparty', '')]
+        return [record.get(k, '') for k in ('source', 'sheet', 'row', 'project', 'counterparty', 'date', 'description', 'reference', 'account', 'currency')] + [format_cents(amount), record.get('originalProject', ''), record.get('originalCounterparty', ''), record.get('subjectCode',''), record.get('subjectName',''), record.get('baseCurrency',''), format_cents(record.get('baseAmount')), record.get('baseError','')]
 
     def detail_rows(entries):
         for group, entry in enumerate(entries, 1):
             left = entry.get('leftRows') or ([entry['left']] if entry.get('left') else [])
             right = entry.get('rightRows') or ([entry['right']] if entry.get('right') else [])
             for i in range(max(len(left), len(right))):
-                yield [group, entry.get('pair', ''), entry.get('reason', ''), entry.get('matchType', ''), entry.get('feeStatus', '')] + record_values(left[i] if i < len(left) else None) + record_values(right[i] if i < len(right) else None) + [format_cents(entry.get('delta')) if i == 0 else '']
+                yield [group, entry.get('pair', ''), entry.get('reason', ''), entry.get('matchType', ''), entry.get('feeStatus', '')] + record_values(left[i] if i < len(left) else None) + record_values(right[i] if i < len(right) else None) + [format_cents(entry.get('delta')) if i == 0 else '', format_cents(entry.get('baseDelta')) if i == 0 else '', entry.get('baseCurrency','')]
 
-    for key, label in [('matched', '已匹配'), ('differences', '待核实差异'), ('ambiguous', '重复或组合冲突'), ('invalid', '无效数据'), ('fees', '疑似手续费明细')]:
-        add_sheet(label, ['本表配对组号', '项目组合', '说明', '配对类型', '手续费核对状态'] + ['左侧' + h for h in record_headers] + ['右侧' + h for h in record_headers] + ['组金额差额'], detail_rows(report.get(key, [])))
-    add_sheet('项目往来汇总', ['项目A', '项目B', '币种', 'A方净发生额', 'B方净发生额', '反向核对差额', 'A方条数', 'B方条数', '待核实项', '未提供账簿项目', '状态'],
-              ([p['projectA'], p['projectB'], p['currency'], format_cents(p['left']), format_cents(p['right']), format_cents(p['delta']), p['leftCount'], p['rightCount'], p['outstanding'], p['missingProject'], p['status']] for p in report.get('projectPairs', [])))
+    for key, label in [('matched', '已匹配'), ('differences', '待核实差异'), ('ambiguous', '重复或组合冲突'), ('invalid', '无效数据'), ('fees', '疑似手续费明细'), ('translationDifferences', '本币金额差异')]:
+        add_sheet(label, ['本表配对组号', '项目组合', '说明', '配对类型', '手续费核对状态'] + ['左侧' + h for h in record_headers] + ['右侧' + h for h in record_headers] + ['组金额差额', '本币金额差额', '差额本币币种'], detail_rows(report.get(key, [])))
+    add_sheet('项目往来汇总', ['项目A', '项目B', '币种', 'A方净发生额', 'B方净发生额', '反向核对差额', 'A方条数', 'B方条数', '待核实项', '未提供账簿项目', '状态','金额口径','本币金额差异项数'],
+              ([p['projectA'], p['projectB'], p['currency'], format_cents(p['left']), format_cents(p['right']), format_cents(p['delta']), p['leftCount'], p['rightCount'], p['outstanding'], p['missingProject'], p['status'],'原币发生额',p.get('baseDifferenceCount',0)] for p in report.get('projectPairs', [])))
     fee_keys = ['leftCount', 'leftExpense', 'leftRefund', 'rightCount', 'rightExpense', 'rightRefund', 'delta', 'missingLeftCount', 'missingLeftExpense', 'missingLeftRefund', 'missingRightCount', 'missingRightExpense', 'missingRightRefund']
     add_sheet('手续费汇总', ['币种', '左侧笔数', '左侧支出', '左侧退款', '右侧笔数', '右侧支出', '右侧退款', '规则调整后差额', '疑似左侧漏记笔数', '疑似左侧漏记支出', '疑似左侧漏记退款', '疑似右侧漏记笔数', '疑似右侧漏记支出', '疑似右侧漏记退款'],
               ([p['currency']] + [p[k] if k.endswith('Count') else format_cents(p[k]) for k in fee_keys] for p in report.get('feeSummary', [])))
     add_sheet('资金净额汇总', ['项目组合', '币种', '左侧净额', '右侧净额', '规则调整后差额'],
               ([p.get('pairLabel', ''), p['currency'], format_cents(p['left']), format_cents(p['right']), format_cents(p['delta'])] for p in report.get('totals', [])))
+    add_sheet('项目导入检查', ['文件','本方项目','金额口径','所选原币金额列','币种','最早交易日','最晚交易日','记录数','无效记录数'], ([i['source'],i['project'],i['amountBasis'],' / '.join(i['amountColumns']),' / '.join(i['currency']),i['startDate'],i['endDate'],i['count'],i['invalidCount']] for i in report.get('importInventory',[])))
+    add_sheet('期间外记录', ['组号','项目组合','说明','配对类型','手续费核对状态'] + ['左侧'+h for h in record_headers] + ['右侧'+h for h in record_headers] + ['原币差额','本币差额','本币币种'], detail_rows(report.get('excludedPeriod',[])))
     add_sheet('账户范围说明', ['左右侧', '文件', '工作表', '原始行', '银行账户', '未纳入原因'], ([r.get(k, '') for k in ('side','source','sheet','row','account','reason')] for r in report.get('excludedAccounts', [])))
     add_sheet('核对规则与提示', ['规则', '内容'], [[k, str(v)] for k, v in report['options'].items()] + [['项目名称对照', json.dumps(report.get('aliases', {}), ensure_ascii=False)]] + [['提示', w] for w in report.get('warnings', [])] + [['核对范围', '仅比较本次导入的发生额，不包含未导入的期初余额；疑似手续费需人工确认；一笔对多笔在唯一一对一匹配之后进行。']])
     output = BytesIO()
@@ -198,6 +212,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8')}
+        if path == '/api/project-template':
+            return self.send(200, project_template(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         if path == '/api/health':
             return self.send(200, {'status': 'ok'})
         if path not in files:

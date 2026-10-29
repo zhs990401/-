@@ -15,6 +15,7 @@ import openpyxl
 import xlrd
 from reconcile import reconcile, reconcile_projects, reconcile_account
 from cashflow import calculate_cashflow, export_cashflow
+from project_import import project_template
 from server import ROOT, export_report, parse_file, validate_dataset
 
 MAX_REQUEST = 40 * 1024 * 1024
@@ -59,6 +60,8 @@ class OnlineApp:
         if not self.authorized(environ.get('HTTP_AUTHORIZATION', '')):
             return respond('401 Unauthorized', {'error': '请使用网站的访问账号和密码登录'}, extra=[('WWW-Authenticate', 'Basic realm="Ledger reconciliation", charset="UTF-8"')])
         if method == 'GET':
+            if path == '/api/project-template':
+                return respond('200 OK', project_template(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8')}
             if path not in files:
                 return respond('404 Not Found', {'error': '页面不存在'})

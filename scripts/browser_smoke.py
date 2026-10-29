@@ -71,7 +71,7 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     page.locator('#project-demo').click()
     page.locator('#run').click()
     expect(page.locator('#results')).to_be_visible()
-    assert page.locator('.stat strong').all_text_contents() == ['2','2','0','0']
+    assert page.locator('.stat strong').all_text_contents() == ['2','2','0','0','1'], page.locator('.stat strong').all_text_contents()
     expect(page.locator('#project-summary tbody tr')).to_have_count(4)
     expect(page.locator('#report-warnings')).to_contain_text('项目D')
     expect(page.locator('#direction')).to_be_disabled()
@@ -81,6 +81,18 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     info.value.save_as(dest)
     wb = openpyxl.load_workbook(dest)
     assert wb['项目往来汇总'].max_row == 5
+    assert wb['本币金额差异'].max_row == 3  # One group, two right-side constituents.
+    wb.close()
+    page.locator('#project-pair-filter').select_option(label='项目A ↔ 项目B')
+    expect(page.locator('#project-summary tbody tr')).to_have_count(1)
+    page.get_by_role('button',name='本币金额差异 1',exact=True).click()
+    expect(page.locator('#report-body')).to_contain_text('CNY 本币差额 100.00')
+    page.locator('#project-pair-filter').select_option('')
+    with page.expect_download() as info:
+        page.get_by_role('link',name='下载导表模板').click()
+    dest=Path(output)/'template.xlsx';info.value.save_as(dest)
+    wb=openpyxl.load_workbook(dest)
+    assert '原币借方发生额' in [c.value for c in wb['往来明细'][1]]
     wb.close()
     page.locator('#nav-bank').click()
     expect(page.locator('#results')).to_be_visible()
@@ -91,7 +103,7 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     page.locator('#nav-projects').click()
     expect(page.locator('#days')).to_have_value('0')
     expect(page.locator('#results')).to_be_visible()
-    assert page.locator('.stat strong').all_text_contents() == ['2','2','0','0']
+    assert page.locator('.stat strong').all_text_contents() == ['2','2','0','0','1'], page.locator('.stat strong').all_text_contents()
     page.locator('#nav-bank').click()
     expect(page.locator('#days')).to_have_value('3')
     expect(page.locator('#results')).to_be_hidden()
@@ -107,17 +119,17 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     page.reload()
     expect(page.locator('#nav-projects')).to_have_attribute('aria-current', 'page')
     page.locator('#nav-projects').click()
-    headers = ['日期','对方项目','摘要','借方金额','贷方金额','参考号']
-    a = xlsx(headers, [[datetime(2026,1,1),'项目B','拨付',1000,None,'AB']])
-    b = xlsx(headers, [[datetime(2026,1,1),'项目A','第一笔',None,600,'AB'],[datetime(2026,1,1),'项目A','第二笔',None,400,'AB']])
-    c = xlsx(headers, [[datetime(2026,1,1),'项目D','缺少对方',20,None,'CD']])
-    page.locator('#project-batch').set_input_files([upload('A.xlsx',a),upload('B.xlsx',b),upload('C.xlsx',c)])
-    expect(page.locator('#file-p3').locator('..').locator('.dropzone b')).to_have_text('C.xlsx')
+    headers = ['日期','对方项目','摘要','原币借方发生额','原币贷方发生额','参考号','原币币种']
+    a = xlsx(headers, [[datetime(2026,1,1),'项目B','拨付',1000,None,'AB','USD']])
+    b = xlsx(headers, [[datetime(2026,1,1),'项目A','第一笔',None,600,'AB','USD'],[datetime(2026,1,1),'项目A','第二笔',None,400,'AB','USD']])
+    c = xlsx(headers, [[datetime(2026,1,1),'项目D','缺少对方',20,None,'CD','USD']])
+    page.locator('#project-batch').set_input_files([upload('项目A.xlsx',a),upload('项目B.xlsx',b),upload('项目C.xlsx',c)])
+    expect(page.locator('#file-p3').locator('..').locator('.dropzone b')).to_have_text('项目C.xlsx')
     for id_, name in [('p1','项目A'),('p2','项目B'),('p3','项目C')]:
-        page.locator('[data-project-name="'+id_+'"]').fill(name)
+        expect(page.locator('[data-project-name="'+id_+'"]')).to_have_value(name)
     page.locator('#run').click()
     expect(page.locator('#results')).to_be_visible()
-    assert page.locator('.stat strong').all_text_contents()==['1','1','0','0']
+    assert page.locator('.stat strong').all_text_contents()==['1','1','0','0','0']
     expect(page.locator('#report-warnings')).to_contain_text('项目D')
 
     # Combined sheet uses project-column mapping; aliases resolve both directions.
@@ -129,14 +141,62 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     page.locator('#file-p1').set_input_files(upload('合并表.xlsx',combined))
     expect(page.locator('#file-p1').locator('..').locator('.dropzone b')).to_have_text('合并表.xlsx')
     page.locator('#aliases').fill('甲=A\n乙=B')
+    expect(page.locator('#run')).to_be_disabled()
+    page.locator('[data-project-setting="originalConfirmed"]').check()
+    page.locator('[data-project-setting="currencyName"]').fill('CNY')
     page.locator('#run').click()
     expect(page.locator('#results')).to_be_visible()
-    assert page.locator('.stat strong').all_text_contents()==['1','0','0','0']
+    assert page.locator('.stat strong').all_text_contents()==['1','0','0','0','0']
     page.get_by_role('button',name='已匹配 1',exact=True).click()
     expect(page.locator('#report-body')).to_contain_text('<script>保留为文本</script>')
     expect(page.locator('#report-body script')).to_have_count(0)
     page.locator('#days').select_option('1')
     expect(page.locator('#results')).to_be_hidden()
+    # Real exports with a title row, base columns before original columns, and different vouchers.
+    page.reload()
+    original_headers=['记账日期','往来单位名称','本币借方发生额','本币贷方发生额','原币借方发生额','原币贷方发生额','原币币种','本币币种','凭证号']
+    def titled_export(rows):
+        wb=openpyxl.Workbook();wb.active.title='说明';wb.active.append(['导出说明'])
+        sheet=wb.create_sheet('往来明细');sheet.append(['内部往来辅助明细账']);sheet.append(original_headers)
+        for row in rows:sheet.append(row)
+        stream=BytesIO();wb.save(stream);wb.close();return stream.getvalue()
+    a=titled_export([[datetime(2025,12,31),'项目B',72,None,10,None,'USD','CNY','A0'],[datetime(2026,1,1),'项目B',7200,None,1000,None,'USD','CNY','A1']])
+    b=titled_export([[datetime(2026,1,1),'项目A',None,7300,None,1000,'美元','CNY','B99']])
+    page.locator('#project-batch').set_input_files([upload('项目A.xlsx',a),upload('项目B.xlsx',b)])
+    expect(page.locator('#file-p2').locator('..').locator('.dropzone b')).to_have_text('项目B.xlsx')
+    expect(page.locator('[data-id="p1"][data-map="debit"]')).to_have_value('原币借方发生额')
+    expect(page.locator('#header-p1')).to_have_value('2')
+    expect(page.locator('#sheet-p1')).to_have_value('往来明细')
+    expect(page.locator('#project-import-check')).to_contain_text('0 份待确认')
+    page.locator('#project-start').fill('2026-01-01')
+    page.locator('#project-end').fill('2026-01-31')
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents()==['1','0','0','0','1']
+    expect(page.locator('#report-warnings')).to_contain_text('1 条记录不在选定期间')
+    page.get_by_role('button',name='本币金额差异 1',exact=True).click()
+    expect(page.locator('#report-body')).to_contain_text('-100.00')
+    page.locator('[data-id="p1"][data-map="debit"]').select_option('本币借方发生额')
+    expect(page.locator('#run')).to_be_disabled()
+    expect(page.locator('#project-import-check')).to_contain_text('所选金额不是原币发生额')
+
+    # An explicitly confirmed original-currency mapping can be shared by identical templates.
+    page.reload()
+    generic_headers=['日期','对方项目','借方金额','贷方金额']
+    a=xlsx(generic_headers,[[datetime(2026,1,1),'项目B',10,None]])
+    b=xlsx(generic_headers,[[datetime(2026,1,1),'项目A',None,10]])
+    page.locator('#project-batch').set_input_files([upload('项目A.xlsx',a),upload('项目B.xlsx',b)])
+    expect(page.locator('#file-p2').locator('..').locator('.dropzone b')).to_have_text('项目B.xlsx')
+    page.locator('[data-id="p1"][data-project-setting="originalConfirmed"]').check()
+    page.locator('[data-id="p1"][data-project-setting="currencyName"]').fill('USD')
+    expect(page.locator('#run')).to_be_disabled()
+    page.locator('[data-project-apply="p1"]').click()
+    expect(page.locator('[data-project-name="p2"]')).to_have_value('项目B')
+    expect(page.locator('[data-id="p2"][data-project-setting="currencyName"]')).to_have_value('USD')
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents()==['1','0','0','0','0']
+
     # Bank reconciliation is constrained to one explicit account, including report totals.
     page.locator('#nav-bank').click()
     bank_headers=['日期','账户','收入金额','支出金额','流水号']
@@ -219,4 +279,4 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#cf-details tr')).to_have_count(2)
     assert not errors, errors
     browser.close()
-    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; no JavaScript errors.')
+    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; original/base currency separation, auto header and filename inference, period filtering, mapping reuse, project/currency filters and template download; no JavaScript errors.')

@@ -64,7 +64,7 @@ def normalize(dataset, side):
         values = dict(zip(dataset['headers'], cells))
         get = lambda key: str(values.get(mapping.get(key), '') or '').strip()
         record = {'side': side, 'row': number, 'date': get('date'), 'description': get('description'),
-                  'reference': get('reference'), 'currency': get('currency').upper() or 'CNY',
+                  'reference': get('reference'), 'currency': get('currency').upper() or str(dataset.get('currencyName', 'CNY')).strip().upper(),
                   'account': get('account') if mapping.get('account') else str(dataset.get('accountName', '')).strip(), 'amount': None, 'source': dataset.get('name', ''),
                   'sheet': dataset.get('sheet', ''), 'datasetId': dataset.get('id', side),
                   'project': get('project') if mapping.get('project') else str(dataset.get('projectName', '')).strip(),
@@ -124,7 +124,9 @@ def aggregate(records):
             'description': ' / '.join(r['description'] for r in records),
             'reference': ' / '.join(dict.fromkeys(r['reference'] for r in records if r['reference'])),
             'source': ' / '.join(dict.fromkeys(r['source'] for r in records)),
-            'amount': sum(r['amount'] for r in records)}
+            'amount': sum(r['amount'] for r in records),
+            'baseAmount': sum(r['baseAmount'] for r in records) if all(r.get('baseAmount') is not None for r in records) and len({r.get('baseCurrency') for r in records}) == 1 else None,
+            'baseCurrency': records[0].get('baseCurrency', '') if len({r.get('baseCurrency') for r in records}) == 1 else ''}
 
 
 def group_search(left, right, remaining_l, remaining_r, options):
@@ -407,13 +409,30 @@ def project_aliases(aliases):
 
 
 def reconcile_projects(payload):
+    from project_import import prepare_project_dataset, enrich_project_rows
+    import hashlib
+    import json
     datasets = payload.get('datasets', [])
     if not isinstance(datasets, list) or not 1 <= len(datasets) <= 20:
         raise ValueError('请上传 1 至 20 份项目往来账（合并表可通过本方项目列区分）')
     options = settings({**payload.get('options', {}), 'direction': 'reverse', 'separateFees': False, 'matchAccount': False})
     resolve = project_aliases(payload.get('aliases', {}))
     records, invalid, projects = [], [], set()
-    for d in datasets:
+    inventory, excluded_period, seen_files = [], [], set()
+    start_text = str(options.get('startDate', '')).strip()
+    end_text = str(options.get('endDate', '')).strip()
+    start_date = day(start_text).isoformat() if start_text else ''
+    end_date = day(end_text).isoformat() if end_text else ''
+    if start_date and end_date and start_date > end_date:
+        raise ValueError('核对开始日期不能晚于结束日期')
+    options.update(startDate=start_date, endDate=end_date, amountBasis='original')
+    for raw_dataset in datasets:
+        invalid_before = len(invalid)
+        d = prepare_project_dataset(raw_dataset)
+        signature = hashlib.sha256(json.dumps([d['headers'],d['rows'],d['mapping'],resolve(d.get('projectName','')) if not d['mapping'].get('project') else ''], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        if d['rows'] and signature in seen_files:
+            raise ValueError(f"{d.get('name', '项目文件')}：发现同一项目内容完全重复的文件，请移除重复上传，避免重复计算")
+        seen_files.add(signature)
         mapping = d['mapping']
         if not mapping.get('counterparty'):
             raise ValueError(f"{d.get('name', '项目文件')}：请选择对方项目列，不从摘要猜测往来对象")
@@ -422,19 +441,34 @@ def reconcile_projects(payload):
         if options['strictReference'] and not mapping.get('reference'):
             raise ValueError('严格匹配参考号需要每份项目往来账选择参考号列')
         rows, bad = normalize(d, 'left')
+        enrich_project_rows(d, rows)
         invalid.extend(bad)
+        dates = [r['date'] for r in rows]
+        inventory.append({'source':d.get('name',''), 'project':d.get('projectName','') if not mapping.get('project') else '按本方项目列',
+                          'startDate':min(dates) if dates else '', 'endDate':max(dates) if dates else '',
+                          'count':len(rows)+len(bad), 'invalidCount':len(bad), 'currency':sorted({r['currency'] for r in rows if r['currency']}),
+                          'amountColumns':[mapping.get(k,'') for k in ('amount',) if mapping.get('mode')=='signed'] or [mapping.get(k,'') for k in ('debit','credit')],
+                          'amountBasis':'原币发生额'})
+
         if not mapping.get('project'):
             projects.add(resolve(str(d['projectName']).strip()))
         else:
             project_col = d['headers'].index(mapping['project'])
             projects.update(resolve(str(row[project_col]).strip()) for row in d['rows'] if len(row) > project_col and str(row[project_col] or '').strip())
         for r in rows:
+            if (start_date and r['date'] < start_date) or (end_date and r['date'] > end_date):
+                excluded_period.append(item(r, None, '不在本次统一核对期间内，未参与原币核对'))
+                continue
+            if not r['currency'] or r['currency'] in ('原币','本币','外币','本位币'):
+                invalid.append(item(r,None,'原币币种为空或无效，未参与核对；不能假设人民币'))
+                continue
             r['originalProject'], r['originalCounterparty'] = r['project'], r['counterparty']
             r['project'], r['counterparty'] = resolve(r['project']), resolve(r['counterparty'])
             if not r['project'] or not r['counterparty'] or r['project'] == r['counterparty']:
                 invalid.append(item(r, None, '本方/对方项目为空，或双方项目名称相同'))
             else:
                 records.append(r)
+        inventory[-1]['invalidCount'] = len(invalid) - invalid_before
     safe_total(records)
     pairs = defaultdict(lambda: ([], []))
     for r in records:
@@ -442,9 +476,9 @@ def reconcile_projects(payload):
         left, right = pairs[(a, b)]
         r['side'] = 'left' if r['project'] == a else 'right'
         (left if r['side'] == 'left' else right).append(r)
-    report = {key: [] for key in ('matched', 'differences', 'ambiguous', 'fees', 'feeSummary', 'totals', 'projectPairs', 'warnings')}
-    report.update(invalid=invalid, mode='projects', options=options, aliases=payload.get('aliases', {}), projects=sorted(projects),
-                  counts={'left': 0, 'right': 0, 'files': len(datasets), 'projects': len(projects), 'rows': len(records) + len(invalid)})
+    report = {key: [] for key in ('matched', 'differences', 'ambiguous', 'fees', 'feeSummary', 'totals', 'projectPairs', 'warnings', 'translationDifferences')}
+    report.update(baseComparisonSkipped=0, invalid=invalid, importInventory=inventory, excludedPeriod=excluded_period, mode='projects', options=options, aliases=payload.get('aliases', {}), projects=sorted(projects),
+                  counts={'left': 0, 'right': 0, 'files': len(datasets), 'projects': len(projects), 'rows': len(records) + len(invalid), 'excludedPeriod':len(excluded_period)})
     for (a, b), (left, right) in sorted(pairs.items()):
         comparison = compare_records(left, right, options)
         for kind in ('matched', 'differences', 'ambiguous'):
@@ -453,6 +487,16 @@ def reconcile_projects(payload):
                 if kind == 'differences' and (a not in projects or b not in projects):
                     entry['reason'] = '对方项目账簿未提供；' + entry['reason']
                 report[kind].append(entry)
+        for entry in comparison['matched']:
+            l, r = entry['left'], entry['right']
+            comparable = l.get('baseAmount') is not None and r.get('baseAmount') is not None and l.get('baseCurrency') and l['baseCurrency'] == r.get('baseCurrency')
+            if not comparable and (l.get('baseAmount') is not None or r.get('baseAmount') is not None):
+                report['baseComparisonSkipped'] += 1
+            if comparable:
+                delta = l['baseAmount'] + r['baseAmount']
+                if delta:
+                    report['translationDifferences'].append({**entry, 'baseDelta':delta, 'baseCurrency':l['baseCurrency'],
+                        'reason':'原币按规则一致；本币金额不同（可能为折算差异），不计入原币往来差异'})
         report['warnings'].extend(comparison['warnings'])
         report['counts']['left'] += len(left)
         report['counts']['right'] += len(right)
@@ -462,7 +506,8 @@ def reconcile_projects(payload):
             pair = {**total, 'projectA': a, 'projectB': b, 'leftCount': sum(r['currency'] == currency for r in left),
                     'rightCount': sum(r['currency'] == currency for r in right), 'outstanding': outstanding,
                     'missingProject': a if a not in projects else b if b not in projects else '',
-                    'status': '待核实' if outstanding or total['delta'] else '按规则一致'}
+                    'status': '原币待核实' if outstanding or total['delta'] else '原币按规则一致',
+                    'baseDifferenceCount':sum(1 for e in report['translationDifferences'] if e.get('pair')==f'{a} ↔ {b}' and e['left']['currency']==currency)}
             report['projectPairs'].append(pair)
             report['totals'].append({**total, 'pairLabel': f'{a} ↔ {b}'})
     missing = sorted({r['counterparty'] for r in records} - projects)
@@ -470,5 +515,14 @@ def reconcile_projects(payload):
         report['warnings'].append('以下项目没有提供账簿：' + '、'.join(missing))
     if len(projects) < 2:
         report['warnings'].append('当前仅识别到不足两个本方项目，请补齐往来双方账簿')
+    if len({(i['startDate'],i['endDate']) for i in inventory if i['startDate']}) > 1:
+        report['warnings'].append('各项目文件的实际交易日期范围不同，请核实是否导出同一期间；没有交易也可能造成范围不同')
+    base_errors = sum(bool(r.get('baseError')) for r in records)
+    if base_errors:
+        report['warnings'].append(f'{base_errors} 条记录的本币资料不完整或无效，仅核对原币；请在明细的本币说明中查看')
+    if report['baseComparisonSkipped']:
+        report['warnings'].append(f"{report['baseComparisonSkipped']} 组原币已配对记录的本币币种不同或资料不全，未比较本币；未进行汇率换算")
+    if excluded_period:
+        report['warnings'].append(f'{len(excluded_period)} 条记录不在选定期间，详见导出报告的期间外记录')
     report['warnings'] = list(dict.fromkeys(report['warnings']))
     return report

@@ -17,7 +17,7 @@ def ds(rows, name='账簿.xlsx', project=None, own_column=False):
         mapping['counterparty'] = '对方项目'
     if own_column:
         mapping['project'] = '本方项目'
-    return dict(headers=HEADERS, rows=rows, mapping=mapping, name=name, projectName=project or '')
+    return dict(headers=HEADERS, rows=rows, mapping=mapping, name=name, projectName=project or '',originalConfirmed=True)
 
 
 def row(amount, reference='', description='', currency='CNY', account='', own='', other='', dt='2026-01-01'):
@@ -151,7 +151,7 @@ class ProjectTests(unittest.TestCase):
     def test_missing_project_and_zero_net_still_pending(self):
         r = reconcile_projects(dict(datasets=[ds([row(100, other='D'), row(-100, other='D')], project='A')]))
         self.assertEqual(r['projectPairs'][0]['delta'], 0)
-        self.assertEqual(r['projectPairs'][0]['status'], '待核实')
+        self.assertEqual(r['projectPairs'][0]['status'], '原币待核实')
         self.assertEqual(r['projectPairs'][0]['missingProject'], 'D')
         self.assertTrue(r['warnings'])
 
