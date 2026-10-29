@@ -10,7 +10,3 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.14
-      - key: APP_USERNAME
-        sync: false
-      - key: APP_PASSWORD
-        sync: false

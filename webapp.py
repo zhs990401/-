@@ -1,12 +1,5 @@
-"""Password-protected WSGI entrypoint for hosted deployments.
-
-The local server remains loopback-only; this entrypoint always requires credentials.
-"""
-import base64
-import binascii
-import hmac
+"""Public WSGI entrypoint for hosted deployments; no login required."""
 import json
-import os
 import threading
 from urllib.parse import urlsplit
 from zipfile import BadZipFile
@@ -22,24 +15,9 @@ MAX_REQUEST = 40 * 1024 * 1024
 
 
 class OnlineApp:
-    def __init__(self, username, password):
-        if not username or ':' in username or len(password or '') < 16:
-            raise RuntimeError('上线需要设置 APP_USERNAME（不能包含冒号）及至少 16 字符的 APP_PASSWORD；不会以无密码方式启动')
-        self.username = username.encode('utf-8')
-        self.password = password.encode('utf-8')
-        # Only one financial request at a time in this single-user deployment.
+    def __init__(self):
+        # Limit expensive financial processing across public requests.
         self.processing = threading.BoundedSemaphore(1)
-
-    def authorized(self, header):
-        try:
-            scheme, encoded = header.split(' ', 1)
-            if scheme.lower() != 'basic':
-                return False
-            raw = base64.b64decode(encoded.strip(), validate=True)
-            username, separator, password = raw.partition(b':')
-            return bool(separator) & hmac.compare_digest(username, self.username) & hmac.compare_digest(password, self.password)
-        except (ValueError, binascii.Error, UnicodeError):
-            return False
 
     def __call__(self, environ, start_response):
         def respond(status, body, content_type='application/json; charset=utf-8', extra=()):
@@ -57,8 +35,6 @@ class OnlineApp:
         path, method = environ.get('PATH_INFO', '/'), environ.get('REQUEST_METHOD', 'GET')
         if path == '/api/health' and method == 'GET':
             return respond('200 OK', {'status': 'ok'})
-        if not self.authorized(environ.get('HTTP_AUTHORIZATION', '')):
-            return respond('401 Unauthorized', {'error': '请使用网站的访问账号和密码登录'}, extra=[('WWW-Authenticate', 'Basic realm="Ledger reconciliation", charset="UTF-8"')])
         if method == 'GET':
             if path == '/api/project-template':
                 return respond('200 OK', project_template(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
@@ -69,7 +45,7 @@ class OnlineApp:
             return respond('200 OK', (ROOT / filename).read_bytes(), mime)
         if method != 'POST':
             return respond('405 Method Not Allowed', {'error': '请求方法不支持'}, extra=[('Allow', 'GET, POST')])
-        # Reject requests from a foreign website even if the browser caches Basic auth.
+        # Reject processing requests from a foreign website.
         origin = environ.get('HTTP_ORIGIN')
         if origin:
             parsed_origin = urlsplit(origin)
@@ -131,4 +107,4 @@ class OnlineApp:
 
 
 def create_app():
-    return OnlineApp(os.environ.get('APP_USERNAME'), os.environ.get('APP_PASSWORD'))
+    return OnlineApp()
