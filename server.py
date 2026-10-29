@@ -1,4 +1,5 @@
 """Single-user local reconciliation server. Uploaded files are never saved."""
+from bank_batch import parse_bank_file, reconcile_bank_batch, export_bank_batch
 import argparse
 import base64
 import csv
@@ -223,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8')}
+        files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8'), '/bank_batch.js': ('bank_batch.js', 'text/javascript; charset=utf-8')}
         if path == '/api/project-template':
             return self.send(200, project_template(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         if path == '/api/health':
@@ -244,6 +245,12 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 40 * 1024 * 1024:
                 return self.send(413, {'error': '请求为空或超过大小限制'})
             payload = json.loads(self.rfile.read(length))
+            if self.path == '/api/bank-batch/parse':
+                return self.send(200, parse_bank_file(payload))
+            if self.path == '/api/bank-batch/reconcile':
+                return self.send(200, reconcile_bank_batch(payload))
+            if self.path == '/api/bank-batch/export':
+                return self.send(200, export_bank_batch(payload), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
             if self.path == '/api/parse':
                 return self.send(200, parse_file(payload))
             if self.path == '/api/reconcile':

@@ -1,4 +1,5 @@
 """Public WSGI entrypoint for hosted deployments; no login required."""
+from bank_batch import parse_bank_file, reconcile_bank_batch, export_bank_batch
 import json
 import threading
 from urllib.parse import urlsplit
@@ -38,7 +39,7 @@ class OnlineApp:
         if method == 'GET':
             if path == '/api/project-template':
                 return respond('200 OK', project_template(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-            files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8')}
+            files = {'/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8'), '/cashflow.js': ('cashflow.js', 'text/javascript; charset=utf-8'), '/bank_batch.js': ('bank_batch.js', 'text/javascript; charset=utf-8')}
             if path not in files:
                 return respond('404 Not Found', {'error': '页面不存在'})
             filename, mime = files[path]
@@ -53,7 +54,7 @@ class OnlineApp:
                 return respond('403 Forbidden', {'error': '不允许跨站请求'})
         if environ.get('CONTENT_TYPE', '').split(';')[0] != 'application/json':
             return respond('415 Unsupported Media Type', {'error': '请求格式必须为 JSON'})
-        if path not in ('/api/parse', '/api/reconcile', '/api/projects', '/api/export', '/api/cashflow', '/api/cashflow/export'):
+        if path not in ('/api/bank-batch/parse', '/api/bank-batch/reconcile', '/api/bank-batch/export', '/api/parse', '/api/reconcile', '/api/projects', '/api/export', '/api/cashflow', '/api/cashflow/export'):
             return respond('404 Not Found', {'error': '接口不存在'})
         try:
             length = int(environ.get('CONTENT_LENGTH') or 0)
@@ -70,7 +71,13 @@ class OnlineApp:
             payload = json.loads(content)
             if not isinstance(payload, dict):
                 raise ValueError('请求内容必须为对象')
-            if path == '/api/parse':
+            if path == '/api/bank-batch/parse':
+                result = parse_bank_file(payload)
+            elif path == '/api/bank-batch/reconcile':
+                result = reconcile_bank_batch(payload)
+            elif path == '/api/bank-batch/export':
+                return respond('200 OK', export_bank_batch(payload), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            elif path == '/api/parse':
                 result = parse_file(payload)
             elif path == '/api/reconcile':
                 for side in ('left', 'right'):
