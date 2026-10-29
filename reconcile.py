@@ -130,7 +130,7 @@ def aggregate(records):
 
 
 def group_search(left, right, remaining_l, remaining_r, options):
-    """Only unmatched, unambiguous rows enter bounded subset search.
+    """Search amount patterns before deciding whether source rows conflict.
 
     Proposals from both directions are collected before accepting any, so shared
     constituents never get consumed greedily. A budget failure accepts no groups.
@@ -158,6 +158,7 @@ def group_search(left, right, remaining_l, remaining_r, options):
     ):
         plain = build_index(target, remaining_t, tf, False)
         references = build_index(target, remaining_t, tf, True)
+        pattern_groups = defaultdict(list)
         for i in sorted(remaining_s):
             r = source[i]
             pools = []
@@ -177,14 +178,16 @@ def group_search(left, right, remaining_l, remaining_r, options):
                 if len(candidates) + size > GROUP_CANDIDATES:
                     return [], set(remaining_l), set(remaining_r), '组合候选超过 18 条，本轮组合审核未自动配对；请缩小日期范围或按账户/参考号拆分'
                 candidates.extend(pool[:size])
-            solutions = []
+            solutions = set()
             for count in range(2, min(limit, len(candidates)) + 1):
                 for combo in combinations(candidates, count):
                     budget -= 1
                     if budget < 0:
                         return [], set(remaining_l), set(remaining_r), '组合搜索达到计算上限，本轮组合审核未自动配对；请缩小期间或按账户/参考号拆分'
                     if sum(value for value, _ in combo) == target_amount:
-                        solutions.append(tuple(sorted(j for _, j in combo)))
+                        # Swapping equal-valued source rows is the same amount
+                        # pattern, not a second business-level split proposal.
+                        solutions.add(tuple(sorted(value for value, _ in combo)))
                         if len(solutions) == 2:
                             break
                 if len(solutions) == 2:
@@ -193,7 +196,21 @@ def group_search(left, right, remaining_l, remaining_r, options):
                 (blocked_l if is_left else blocked_r).add(i)
                 (blocked_r if is_left else blocked_l).update(j for _, j in candidates)
             elif solutions:
-                proposals.add(((i,), solutions[0]) if is_left else (solutions[0], (i,)))
+                pattern = next(iter(solutions))
+                members = tuple(sorted(j for value, j in candidates if value in pattern))
+                pattern_groups[(pattern, members)].append(i)
+        for (pattern, members), anchors in pattern_groups.items():
+            required = Counter(pattern)
+            actual = Counter(abs(target[j]['amount']) for j in members)
+            complete = all(actual[value] == len(anchors) * count for value, count in required.items())
+            repeated_allowed = len(anchors) == 1 or options['matchDuplicateCounts']
+            if complete and repeated_allowed:
+                il, ir = (tuple(anchors), members) if is_left else (members, tuple(anchors))
+                proposals.add((il, ir))
+            else:
+                # Never choose an arbitrary subset of interchangeable rows.
+                (blocked_l if is_left else blocked_r).update(anchors)
+                (blocked_r if is_left else blocked_l).update(members)
     usage_l, usage_r = Counter(), Counter()
     for il, ir in proposals:
         usage_l.update(il)
@@ -253,8 +270,8 @@ def compare_records(left, right, options):
                                 leftCount=len(a),rightCount=len(b),leftRows=a,rightRows=b))
     group_l, group_r, group_warning = set(), set(), ''
     if options['oneToMany']:
-        remaining_l = {i for i in range(len(left)) if i not in used_l and i not in count_l and not lc[i]}
-        remaining_r = {j for j in range(len(right)) if j not in used_r and j not in count_r and not rc[j]}
+        remaining_l = {i for i in range(len(left)) if i not in used_l and i not in count_l and not any(j not in used_r for j in lc[i])}
+        remaining_r = {j for j in range(len(right)) if j not in used_r and j not in count_r and not any(i not in used_l for i in rc[j])}
         groups, group_l, group_r, group_warning = group_search(left, right, remaining_l, remaining_r, options)
         if group_warning:
             warnings.append(group_warning)
@@ -262,8 +279,12 @@ def compare_records(left, right, options):
             a, b = [left[i] for i in il], [right[j] for j in ir]
             used_l.update(il)
             used_r.update(ir)
-            matched.append(item(aggregate(a), aggregate(b), f'一笔对多笔（左 {len(a)} 笔 ↔ 右 {len(b)} 笔），同方向合计一致',
-                                delta=0, matchType='one_to_many', leftRows=a, rightRows=b))
+            repeated = len(a) > 1 and len(b) > 1
+            reason = (f'重复一对多按组匹配（左 {len(a)} 笔 ↔ 右 {len(b)} 笔），拆分金额及各金额笔数一致；未指定组内逐笔对应关系'
+                      if repeated else f'一笔对多笔（左 {len(a)} 笔 ↔ 右 {len(b)} 笔），同方向合计一致')
+            matched.append(item(aggregate(a), aggregate(b), reason,
+                                delta=0, matchType='repeated_split' if repeated else 'one_to_many', statisticalMatch=repeated,
+                                leftCount=len(a), rightCount=len(b), leftRows=a, rightRows=b))
     refs_l, refs_r = defaultdict(list), defaultdict(list)
     for records, used, index in ((left, used_l, refs_l), (right, used_r, refs_r)):
         for i, r in enumerate(records):

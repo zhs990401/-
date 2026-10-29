@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 import tempfile
 from datetime import datetime
+import csv
 import os
 import openpyxl
 from playwright.sync_api import sync_playwright, expect
@@ -314,6 +315,51 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#duplicate-count-summary')).to_contain_text('数量不一致，人工复核')
     expect(page.locator('#duplicate-count-summary')).to_contain_text('原始左 2 笔 / 右 1 笔')
 
+    # Repeated split amounts form one group, with separate source rows in exports.
+    repeated_parts=xlsx(count_headers,[[datetime(2026,3,1),'COUNT-A',amount,None,''] for amount in [60,40,60,40]])
+    page.locator('#file-right').set_input_files(upload('repeated_parts.xlsx',repeated_parts))
+    expect(page.locator('#file-right').locator('..').locator('.dropzone b')).to_have_text('repeated_parts.xlsx')
+    page.locator('#oneToMany').check()
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents()==['1','0','0','0','0']
+    expect(page.locator('#result-summary')).to_contain_text('1 组重复一对多按组匹配')
+    expect(page.locator('#duplicate-count-summary')).to_be_hidden()
+    page.get_by_role('button',name='已匹配 1',exact=True).click()
+    expect(page.locator('#report-body')).to_contain_text('左 2 笔 ↔ 右 4 笔')
+    expect(page.locator('#report-body')).to_contain_text('组内未指定逐笔对应')
+    expect(page.locator('#report-body')).to_contain_text('40.00 × 2；60.00 × 2')
+    expect(page.locator('#report-body')).to_contain_text('合计 200.00')
+    for details in page.locator('#report-body details').all():
+        details.locator('summary').click()
+    expect(page.locator('#report-body')).to_contain_text('第 5 行')
+    with page.expect_download() as info:
+        page.locator('#export-excel').click()
+    dest=Path(output)/'repeated_split.xlsx';info.value.save_as(dest)
+    wb=openpyxl.load_workbook(dest)
+    assert wb['已匹配'].max_row==7
+    assert wb['重复或组合冲突'].max_row==1
+    columns=[c.value for c in wb['已匹配'][1]]
+    li,ri=columns.index('左侧文件'),columns.index('右侧文件')
+    assert all(bool(r[li])!=bool(r[ri]) for r in wb['已匹配'].iter_rows(min_row=2,values_only=True))
+    wb.close()
+    with page.expect_download() as info:
+        page.locator('#export').click()
+    dest=Path(output)/'repeated_split.csv';info.value.save_as(dest)
+    with dest.open(encoding='utf-8-sig',newline='') as stream:
+        exported=list(csv.DictReader(stream))
+    members=[r for r in exported if r['分类']=='已匹配']
+    assert len(members)==6
+    assert all(bool(r['左侧文件'])!=bool(r['右侧文件']) for r in members)
+    assert len({r['组号'] for r in members})==1
+    page.locator('#oneToMany').uncheck()
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents()==['0','0','6','0','0']
+    page.locator('#oneToMany').check()
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+
     # Cash-flow demo, project/month totals, graph, reports, and per-module persistence.
     page.locator('#nav-cashflow').click()
     expect(page.locator('#feature-title')).to_have_text('项目现金流统计')
@@ -385,4 +431,4 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#cf-details tr')).to_have_count(2)
     assert not errors, errors
     browser.close()
-    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; original/base currency separation, combined three-column ledger upload, automatic internal-unit discovery, project overview, explicit unlimited date controls, auto headers, mapping reuse, project/currency filters and template download; repeated-amount equal/unequal counts, count-rule toggle and non-pairwise group export; no JavaScript errors.')
+    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; original/base currency separation, combined three-column ledger upload, automatic internal-unit discovery, project overview, explicit unlimited date controls, auto headers, mapping reuse, project/currency filters and template download; repeated-amount equal/unequal counts, repeated split patterns, switches, constituent counts and non-pairwise XLSX/CSV group export; no JavaScript errors.')

@@ -172,7 +172,7 @@ def export_report(report):
         for group, entry in enumerate(entries, 1):
             left = entry.get('leftRows') or ([entry['left']] if entry.get('left') else [])
             right = entry.get('rightRows') or ([entry['right']] if entry.get('right') else [])
-            members = [(r,None) for r in left] + [(None,r) for r in right] if entry.get('matchType')=='amount_count' else [(left[i] if i<len(left) else None,right[i] if i<len(right) else None) for i in range(max(len(left),len(right)))]
+            members = [(r,None) for r in left] + [(None,r) for r in right] if entry.get('statisticalMatch') or entry.get('matchType')=='amount_count' else [(left[i] if i<len(left) else None,right[i] if i<len(right) else None) for i in range(max(len(left),len(right)))]
             for i,(left_record,right_record) in enumerate(members):
                 yield [group, entry.get('pair', ''), entry.get('reason', ''), entry.get('matchType', ''), entry.get('feeStatus', '')] + record_values(left_record) + record_values(right_record) + [format_cents(entry.get('delta')) if i == 0 else '', format_cents(entry.get('baseDelta')) if i == 0 else '', entry.get('baseCurrency','')]
 
