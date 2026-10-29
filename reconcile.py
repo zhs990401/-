@@ -547,11 +547,8 @@ def reconcile_projects(payload):
                 continue
             r['originalProject'], r['originalCounterparty'] = r['project'], r['counterparty']
             r['project'], r['counterparty'] = resolve(r['project']), resolve(r['counterparty'])
-            if d.get('ledgerFormat') and r['project'] and r['project'] == r['counterparty']:
-                ledger_excluded.append(item(r,None,'往来单位与本账簿同名，不属于跨项目往来，未参加互核',ledgerCategory='self'))
-                continue
-            if not r['project'] or not r['counterparty'] or r['project'] == r['counterparty']:
-                invalid.append(item(r, None, '本方/对方项目为空，或双方项目名称相同'))
+            if not r['project'] or not r['counterparty']:
+                invalid.append(item(r, None, '本方/对方项目为空'))
             else:
                 records.append(r)
         inventory[-1]['invalidCount'] = len(invalid) - invalid_before
@@ -560,7 +557,9 @@ def reconcile_projects(payload):
     for r in records:
         a, b = sorted((r['project'], r['counterparty']))
         left, right = pairs[(a, b)]
-        r['side'] = 'left' if r['project'] == a else 'right'
+        # Self-counterparty records have one source ledger, split by debit/credit.
+        # Each original row enters exactly one side and can never match itself.
+        r['side'] = 'left' if (r['amount'] > 0 if a == b else r['project'] == a) else 'right'
         (left if r['side'] == 'left' else right).append(r)
     report = {key: [] for key in ('matched', 'differences', 'ambiguous', 'fees', 'feeSummary', 'totals', 'projectPairs', 'warnings', 'translationDifferences','duplicateAmountChecks')}
     report.update(ledgerExcluded=ledger_excluded,unitDiscovery=sorted(internal_names),knownBooks=sorted(known_books),baseComparisonSkipped=0, invalid=invalid, importInventory=inventory, excludedPeriod=excluded_period, mode='projects', options=options, aliases=payload.get('aliases', {}), projects=sorted(projects),
@@ -570,6 +569,9 @@ def reconcile_projects(payload):
         for kind in ('matched', 'differences', 'ambiguous'):
             for entry in comparison[kind]:
                 entry['pair'] = f'{a} ↔ {b}'
+                entry['selfReconciliation'] = a == b
+                if a == b:
+                    entry['reason'] = '本项目自挂往来（借方 ↔ 贷方）；' + entry['reason']
                 if kind == 'differences' and (a not in projects or b not in projects):
                     entry['reason'] = '对方项目账簿未提供；' + entry['reason']
                 report[kind].append(entry)
@@ -591,6 +593,7 @@ def reconcile_projects(payload):
             currency = total['currency']
             outstanding = sum(1 for kind in ('differences', 'ambiguous') for e in comparison[kind] if (e['left'] or e['right'])['currency'] == currency)
             pair = {**total, 'projectA': a, 'projectB': b, 'leftCount': sum(r['currency'] == currency for r in left),
+                    'selfReconciliation': a == b,
                     'rightCount': sum(r['currency'] == currency for r in right), 'outstanding': outstanding,
                     'missingProject': a if a not in projects else b if b not in projects else '',
                     'status': '原币待核实' if outstanding or total['delta'] else '原币按规则一致',
@@ -600,14 +603,14 @@ def reconcile_projects(payload):
     missing = sorted({r['counterparty'] for r in records} - projects)
     if missing:
         report['warnings'].append('以下项目没有提供账簿：' + '、'.join(missing))
-    if len(projects) < 2:
+    if len(projects) < 2 and any(r['project'] != r['counterparty'] for r in records):
         report['warnings'].append('当前仅识别到不足两个本方项目，请补齐往来双方账簿')
     report['unitOverview']=build_unit_overview(report,records,known_books,internal_names)
     if ledger_excluded:
         from collections import Counter
         categories=Counter(e.get('ledgerCategory') for e in ledger_excluded)
         report['ledgerExclusionCounts']=dict(categories)
-        report['warnings'].append(f"单位三栏账未纳入原币配对：汇总/期初行 {categories['summary']} 条，单位归属待确认 {categories['unconfirmed']} 条，零原币发生 {categories['zeroOriginal']} 条，同名本单位往来 {categories['self']} 条；可在未纳入记录中逐项查看")
+        report['warnings'].append(f"单位三栏账未纳入原币配对：汇总/期初行 {categories['summary']} 条，单位归属待确认 {categories['unconfirmed']} 条，零原币发生 {categories['zeroOriginal']} 条；可在未纳入记录中逐项查看")
     if len({(i['startDate'],i['endDate']) for i in inventory if i['startDate']}) > 1:
         report['warnings'].append('各项目文件的实际交易日期范围不同，请核实是否导出同一期间；没有交易也可能造成范围不同')
     base_errors = sum(bool(r.get('baseError')) for r in records)
@@ -626,7 +629,9 @@ def build_unit_overview(report, records, known_books, internal_names):
     from collections import Counter, defaultdict
     own=defaultdict(int);opposite=defaultdict(int);counts=Counter();matched=Counter();pending=Counter()
     for r in records:
-        own[(r['project'],r['currency'])]+=r['amount'];opposite[(r['counterparty'],r['currency'])]+=r['amount'];counts[(r['project'],r['currency'])]+=1
+        own[(r['project'],r['currency'])]+=r['amount'];counts[(r['project'],r['currency'])]+=1
+        if r['project'] != r['counterparty']:
+            opposite[(r['counterparty'],r['currency'])]+=r['amount']
     for e in report['matched']:
         for side in ('left','right'):
             members=e.get(side+'Rows') or ([e[side]] if e.get(side) else [])

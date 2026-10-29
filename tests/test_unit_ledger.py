@@ -29,9 +29,9 @@ class UnitLedgerTests(unittest.TestCase):
 
     def test_internal_external_summary_self_and_base_only_are_distinct(self):
         d=parsed();r=reconcile_projects({'datasets':[d],'options':{'days':'unlimited'}})
-        self.assertEqual(r['ledgerExclusionCounts'],{'summary':3,'unconfirmed':1,'zeroOriginal':1,'self':1})
+        self.assertEqual(r['ledgerExclusionCounts'],{'summary':3,'unconfirmed':1,'zeroOriginal':1})
         self.assertEqual(len(r['matched']),1)
-        self.assertEqual(len(r['differences']),1)
+        self.assertEqual(len(r['differences']),2)
         self.assertFalse(r['invalid'])
         self.assertEqual(r['counts']['rows']+len(r['ledgerExcluded']),10)
         self.assertEqual({r['matched'][0]['left']['row'],r['matched'][0]['right']['row']},{9,10})
@@ -42,8 +42,8 @@ class UnitLedgerTests(unittest.TestCase):
         a=[v for v in r['unitOverview'] if v['project']=='甲项目']
         self.assertEqual(len(a),2)
         usd=next(v for v in a if v['currency']=='USD');mvr=next(v for v in a if v['currency']=='MVR')
-        self.assertEqual(usd['delta'],0)
-        self.assertEqual(usd['ownAmount'],10000)
+        self.assertEqual(usd['delta'],4000)
+        self.assertEqual(usd['ownAmount'],14000)
         self.assertEqual(mvr['delta'],1000)
         self.assertEqual(mvr['pendingCount'],1)
 
@@ -70,7 +70,7 @@ class UnitLedgerTests(unittest.TestCase):
         wb=openpyxl.load_workbook(BytesIO(export_report(r)))
         self.assertEqual(wb['内部单位清单'].max_row,4)
         self.assertGreater(wb['按项目核对概览'].max_row,3)
-        self.assertEqual(wb['未纳入内部核对'].max_row,7)
+        self.assertEqual(wb['未纳入内部核对'].max_row,6)
         self.assertFalse(any(c.data_type=='f' for s in wb for row in s for c in row));wb.close()
 
     def test_currency_code_prefix_is_preserved_as_actual_currency(self):

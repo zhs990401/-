@@ -159,7 +159,9 @@ class ProjectTests(unittest.TestCase):
         rows = [row(100, own='甲', other='乙'), row(-100, own='B', other='A'), row(2, own='A', other='A'), row(3, own='A', other='')]
         r = reconcile_projects(dict(datasets=[ds(rows, own_column=True)], aliases={'甲':'A','乙':'B'}))
         self.assertEqual(len(r['matched']), 1)
-        self.assertEqual(len(r['invalid']), 2)
+        self.assertEqual(len(r['invalid']), 1)
+        self.assertEqual(len(r['differences']), 1)
+        self.assertTrue(r['differences'][0]['selfReconciliation'])
         self.assertEqual(r['matched'][0]['left']['originalProject'], '甲')
         self.assertEqual(r['counts']['projects'], 2)
 

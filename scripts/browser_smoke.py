@@ -218,9 +218,11 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#unit-project-overview')).to_contain_text('乙项目')
     expect(page.locator('#unit-project-overview')).to_contain_text('丙项目')
     expect(page.locator('#unit-project-overview tbody tr')).to_have_count(4)
-    expect(page.locator('#report-warnings')).to_contain_text('同名本单位往来 1 条')
-    page.get_by_role('button',name='未纳入记录 6',exact=True).click()
-    expect(page.locator('#report-body tr')).to_have_count(6)
+    expect(page.locator('#self-project-summary')).to_be_visible()
+    expect(page.locator('#self-project-summary')).to_contain_text('本项目自挂往来核对')
+    expect(page.locator('#self-project-summary')).to_contain_text('40.00')
+    page.get_by_role('button',name='未纳入记录 5',exact=True).click()
+    expect(page.locator('#report-body tr')).to_have_count(5)
     page.get_by_role('button',name='已匹配 1',exact=True).click()
     expect(page.locator('#report-body')).to_contain_text('日期无限制')
     page.locator('[data-open-unit="甲项目"]').first.click()
@@ -231,7 +233,7 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     dest=Path(output)/'combined.xlsx';info.value.save_as(dest)
     wb=openpyxl.load_workbook(dest)
     assert wb['内部单位清单'].max_row==4
-    assert wb['未纳入内部核对'].max_row==7
+    assert wb['未纳入内部核对'].max_row==6
     wb.close()
     page.locator('#project-unit-filter').select_option('')
     page.locator('#project-consolidated').set_input_files(upload('单位三栏账.xlsx',content))
