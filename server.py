@@ -87,6 +87,12 @@ def parse_file(payload):
             rows.append(row)
     else:
         raise ValueError('仅支持 .xlsx、.xls 和 .csv 文件')
+    if payload.get('autoHeader') and suffix in ('.xlsx','.xls'):
+        from unit_ledger import adapt_unit_ledger
+        actual_sheet = sheet.title if suffix == '.xlsx' else sheet.name
+        adapted = adapt_unit_ledger(rows,payload['name'],actual_sheet)
+        if adapted:
+            return {**adapted,'sheets':sheets}
     if payload.get('autoHeader') and 'headerRow' not in payload:
         best = (0, 1)
         for i, candidate in enumerate(rows[:50]):
@@ -169,13 +175,15 @@ def export_report(report):
             for i in range(max(len(left), len(right))):
                 yield [group, entry.get('pair', ''), entry.get('reason', ''), entry.get('matchType', ''), entry.get('feeStatus', '')] + record_values(left[i] if i < len(left) else None) + record_values(right[i] if i < len(right) else None) + [format_cents(entry.get('delta')) if i == 0 else '', format_cents(entry.get('baseDelta')) if i == 0 else '', entry.get('baseCurrency','')]
 
-    for key, label in [('matched', '已匹配'), ('differences', '待核实差异'), ('ambiguous', '重复或组合冲突'), ('invalid', '无效数据'), ('fees', '疑似手续费明细'), ('translationDifferences', '本币金额差异')]:
+    for key, label in [('matched', '已匹配'), ('differences', '待核实差异'), ('ambiguous', '重复或组合冲突'), ('invalid', '无效数据'), ('fees', '疑似手续费明细'), ('translationDifferences', '本币金额差异'), ('ledgerExcluded','未纳入内部核对')]:
         add_sheet(label, ['本表配对组号', '项目组合', '说明', '配对类型', '手续费核对状态'] + ['左侧' + h for h in record_headers] + ['右侧' + h for h in record_headers] + ['组金额差额', '本币金额差额', '差额本币币种'], detail_rows(report.get(key, [])))
     add_sheet('项目往来汇总', ['项目A', '项目B', '币种', 'A方净发生额', 'B方净发生额', '反向核对差额', 'A方条数', 'B方条数', '待核实项', '未提供账簿项目', '状态','金额口径','本币金额差异项数'],
               ([p['projectA'], p['projectB'], p['currency'], format_cents(p['left']), format_cents(p['right']), format_cents(p['delta']), p['leftCount'], p['rightCount'], p['outstanding'], p['missingProject'], p['status'],'原币发生额',p.get('baseDifferenceCount',0)] for p in report.get('projectPairs', [])))
     fee_keys = ['leftCount', 'leftExpense', 'leftRefund', 'rightCount', 'rightExpense', 'rightRefund', 'delta', 'missingLeftCount', 'missingLeftExpense', 'missingLeftRefund', 'missingRightCount', 'missingRightExpense', 'missingRightRefund']
     add_sheet('手续费汇总', ['币种', '左侧笔数', '左侧支出', '左侧退款', '右侧笔数', '右侧支出', '右侧退款', '规则调整后差额', '疑似左侧漏记笔数', '疑似左侧漏记支出', '疑似左侧漏记退款', '疑似右侧漏记笔数', '疑似右侧漏记支出', '疑似右侧漏记退款'],
               ([p['currency']] + [p[k] if k.endswith('Count') else format_cents(p[k]) for k in fee_keys] for p in report.get('feeSummary', [])))
+    add_sheet('内部单位清单', ['内部单位','是否提供账簿'], ([name, '是' if name in report.get('knownBooks',[]) else '否'] for name in report.get('unitDiscovery',[])))
+    add_sheet('按项目核对概览', ['项目','原币币种','本方明细数','已匹配笔数','待核实记录','本方发生净额','对方对应净额','原币差额','是否提供账簿','状态'], ([r['project'],r['currency'],r['count'],r['matchedCount'],r['pendingCount'],format_cents(r['ownAmount']),format_cents(r['reciprocalAmount']),format_cents(r['delta']),r['provided'],r['status']] for r in report.get('unitOverview',[])))
     add_sheet('资金净额汇总', ['项目组合', '币种', '左侧净额', '右侧净额', '规则调整后差额'],
               ([p.get('pairLabel', ''), p['currency'], format_cents(p['left']), format_cents(p['right']), format_cents(p['delta'])] for p in report.get('totals', [])))
     add_sheet('项目导入检查', ['文件','本方项目','金额口径','所选原币金额列','币种','最早交易日','最晚交易日','记录数','无效记录数'], ([i['source'],i['project'],i['amountBasis'],' / '.join(i['amountColumns']),' / '.join(i['currency']),i['startDate'],i['endDate'],i['count'],i['invalidCount']] for i in report.get('importInventory',[])))

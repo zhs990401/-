@@ -94,9 +94,9 @@ def item(left, right, reason, **extra):
 
 
 def settings(options):
-    tolerance = int(options.get('days', 0))
-    if not 0 <= tolerance <= 31:
-        raise ValueError('日期容差必须在 0 至 31 天之间')
+    tolerance = 'unlimited' if options.get('days') == 'unlimited' else int(options.get('days', 0))
+    if tolerance != 'unlimited' and not 0 <= tolerance <= 31:
+        raise ValueError('日期容差必须为无限制或 0 至 31 天')
     max_parts = int(options.get('maxParts', 5))
     if not 2 <= max_parts <= 5:
         raise ValueError('一笔对多笔的拆分上限必须在 2 至 5 笔之间')
@@ -147,7 +147,7 @@ def group_search(left, right, remaining_l, remaining_r, options):
         index = defaultdict(list)
         for j in remaining:
             r = records[j]
-            index[(meta(r, f, use_ref), r['date'])].append((abs(r['amount']), j))
+            index[(meta(r, f, use_ref), '' if days == 'unlimited' else r['date'])].append((abs(r['amount']), j))
         for group in index.values():
             group.sort()
         return index
@@ -162,8 +162,8 @@ def group_search(left, right, remaining_l, remaining_r, options):
             r = source[i]
             pools = []
             ref_pools = []
-            for offset in range(-days, days + 1):
-                dt = (date.fromisoformat(r['date']) + timedelta(days=offset)).isoformat()
+            dates = [''] if days == 'unlimited' else [(date.fromisoformat(r['date']) + timedelta(days=offset)).isoformat() for offset in range(-days, days+1)]
+            for dt in dates:
                 pools.append(plain.get((meta(r, sf, False), dt), []))
                 if r['reference']:
                     ref_pools.append(references.get((meta(r, sf, True), dt), []))
@@ -219,14 +219,14 @@ def compare_records(left, right, options):
     def candidates(source, target, source_factor, target_factor):
         index, refs = defaultdict(list), defaultdict(list)
         for j, r in enumerate(target):
-            index[(key(r, target_factor), r['date'])].append(j)
+            index[(key(r, target_factor), '' if tolerance == 'unlimited' else r['date'])].append(j)
             if r['reference']:
-                refs[(key(r, target_factor), r['date'], r['reference'])].append(j)
+                refs[(key(r, target_factor), '' if tolerance == 'unlimited' else r['date'], r['reference'])].append(j)
         result = []
         for r in source:
             pool, ref_matches = [], []
-            for offset in range(-tolerance, tolerance + 1):
-                dt = (date.fromisoformat(r['date']) + timedelta(days=offset)).isoformat()
+            dates = [''] if tolerance == 'unlimited' else [(date.fromisoformat(r['date']) + timedelta(days=offset)).isoformat() for offset in range(-tolerance,tolerance+1)]
+            for dt in dates:
                 pool.extend(index.get((key(r, source_factor), dt), [])[:202])
                 if r['reference']:
                     ref_matches.extend(refs.get((key(r, source_factor), dt, r['reference']), [])[:202])
@@ -241,7 +241,7 @@ def compare_records(left, right, options):
             j = choices[0]
             used_l.add(i)
             used_r.add(j)
-            matched.append(item(left[i], right[j], '金额、币种和日期符合规则' + ('；参考号一致' if left[i]['reference'] and left[i]['reference'] == right[j]['reference'] else ''), delta=0, matchType='one_to_one'))
+            matched.append(item(left[i], right[j], ('金额、币种符合规则；日期无限制' if tolerance == 'unlimited' else '金额、币种和日期符合规则') + ('；参考号一致' if left[i]['reference'] and left[i]['reference'] == right[j]['reference'] else ''), delta=0, matchType='one_to_one'))
     group_l, group_r, group_warning = set(), set(), ''
     if options['oneToMany']:
         remaining_l = {i for i in range(len(left)) if i not in used_l and not lc[i]}
@@ -418,9 +418,23 @@ def reconcile_projects(payload):
     options = settings({**payload.get('options', {}), 'direction': 'reverse', 'separateFees': False, 'matchAccount': False})
     resolve = project_aliases(payload.get('aliases', {}))
     records, invalid, projects = [], [], set()
+    additional = options.get('additionalInternalUnits', [])
+    if not isinstance(additional,list) or len(additional)>200 or not all(isinstance(n,str) and len(n)<=500 for n in additional):
+        raise ValueError('补充内部单位最多 200 项，每项最多 500 字')
+    known_books = set()
+    for d in datasets:
+        own = d.get('mapping',{}).get('project')
+        if own and own in d['headers']:
+            column=d['headers'].index(own)
+            known_books.update(resolve(str(row[column]).strip()) for row in d['rows'] if column<len(row) and str(row[column] or '').strip())
+        else:
+            name=str(d.get('projectName', d.get('name','').rsplit('.',1)[0])).strip()
+            if name:known_books.add(resolve(name))
+    internal_names=known_books|{resolve(n.strip()) for n in additional if n.strip()}
+    ledger_excluded=[]
     inventory, excluded_period, seen_files = [], [], set()
-    start_text = str(options.get('startDate', '')).strip()
-    end_text = str(options.get('endDate', '')).strip()
+    start_text = '' if options.get('dateRangeMode') == 'unlimited' else str(options.get('startDate', '')).strip()
+    end_text = '' if options.get('dateRangeMode') == 'unlimited' else str(options.get('endDate', '')).strip()
     start_date = day(start_text).isoformat() if start_text else ''
     end_date = day(end_text).isoformat() if end_text else ''
     if start_date and end_date and start_date > end_date:
@@ -441,12 +455,32 @@ def reconcile_projects(payload):
         if options['strictReference'] and not mapping.get('reference'):
             raise ValueError('严格匹配参考号需要每份项目往来账选择参考号列')
         rows, bad = normalize(d, 'left')
+        raw_detail_count=len(rows)+len(bad)
         enrich_project_rows(d, rows)
+        enrich_project_rows(d, [e['left'] for e in bad])
+        if d.get('ledgerFormat'):
+            zero_rows=set(d.get('ledgerZeroOriginalRows',[]))
+            retained=[];retained_bad=[]
+            for summary in d.get('ledgerSummaryRows',[]):
+                ledger_excluded.append(item({**summary,'amount':None,'date':'','reference':'','baseAmount':None},None,summary['reason'],ledgerCategory='summary'))
+            for r in rows:
+                if resolve(r['counterparty']) not in internal_names:
+                    ledger_excluded.append(item(r,None,'往来单位未命中内部账簿名，暂不纳入；请确认是外部单位还是内部单位的别名/未提供账簿',ledgerCategory='unconfirmed'))
+                else:retained.append(r)
+            for e in bad:
+                r=e['left']
+                if resolve(r['counterparty']) not in internal_names:
+                    ledger_excluded.append(item(r,None,'往来单位未命中内部账簿名，暂不纳入',ledgerCategory='unconfirmed'))
+                elif r['row'] in zero_rows:
+                    r['amount']=0
+                    ledger_excluded.append(item(r,None,'原币发生额为零（可能仅本币调整），不参加原币往来配对',ledgerCategory='zeroOriginal'))
+                else:retained_bad.append(e)
+            rows,bad=retained,retained_bad
         invalid.extend(bad)
         dates = [r['date'] for r in rows]
         inventory.append({'source':d.get('name',''), 'project':d.get('projectName','') if not mapping.get('project') else '按本方项目列',
                           'startDate':min(dates) if dates else '', 'endDate':max(dates) if dates else '',
-                          'count':len(rows)+len(bad), 'invalidCount':len(bad), 'currency':sorted({r['currency'] for r in rows if r['currency']}),
+                          'count':raw_detail_count, 'invalidCount':len(bad), 'currency':sorted({r['currency'] for r in rows if r['currency']}),
                           'amountColumns':[mapping.get(k,'') for k in ('amount',) if mapping.get('mode')=='signed'] or [mapping.get(k,'') for k in ('debit','credit')],
                           'amountBasis':'原币发生额'})
 
@@ -464,6 +498,9 @@ def reconcile_projects(payload):
                 continue
             r['originalProject'], r['originalCounterparty'] = r['project'], r['counterparty']
             r['project'], r['counterparty'] = resolve(r['project']), resolve(r['counterparty'])
+            if d.get('ledgerFormat') and r['project'] and r['project'] == r['counterparty']:
+                ledger_excluded.append(item(r,None,'往来单位与本账簿同名，不属于跨项目往来，未参加互核',ledgerCategory='self'))
+                continue
             if not r['project'] or not r['counterparty'] or r['project'] == r['counterparty']:
                 invalid.append(item(r, None, '本方/对方项目为空，或双方项目名称相同'))
             else:
@@ -477,7 +514,7 @@ def reconcile_projects(payload):
         r['side'] = 'left' if r['project'] == a else 'right'
         (left if r['side'] == 'left' else right).append(r)
     report = {key: [] for key in ('matched', 'differences', 'ambiguous', 'fees', 'feeSummary', 'totals', 'projectPairs', 'warnings', 'translationDifferences')}
-    report.update(baseComparisonSkipped=0, invalid=invalid, importInventory=inventory, excludedPeriod=excluded_period, mode='projects', options=options, aliases=payload.get('aliases', {}), projects=sorted(projects),
+    report.update(ledgerExcluded=ledger_excluded,unitDiscovery=sorted(internal_names),knownBooks=sorted(known_books),baseComparisonSkipped=0, invalid=invalid, importInventory=inventory, excludedPeriod=excluded_period, mode='projects', options=options, aliases=payload.get('aliases', {}), projects=sorted(projects),
                   counts={'left': 0, 'right': 0, 'files': len(datasets), 'projects': len(projects), 'rows': len(records) + len(invalid), 'excludedPeriod':len(excluded_period)})
     for (a, b), (left, right) in sorted(pairs.items()):
         comparison = compare_records(left, right, options)
@@ -515,6 +552,12 @@ def reconcile_projects(payload):
         report['warnings'].append('以下项目没有提供账簿：' + '、'.join(missing))
     if len(projects) < 2:
         report['warnings'].append('当前仅识别到不足两个本方项目，请补齐往来双方账簿')
+    report['unitOverview']=build_unit_overview(report,records,known_books,internal_names)
+    if ledger_excluded:
+        from collections import Counter
+        categories=Counter(e.get('ledgerCategory') for e in ledger_excluded)
+        report['ledgerExclusionCounts']=dict(categories)
+        report['warnings'].append(f"单位三栏账未纳入原币配对：汇总/期初行 {categories['summary']} 条，单位归属待确认 {categories['unconfirmed']} 条，零原币发生 {categories['zeroOriginal']} 条，同名本单位往来 {categories['self']} 条；可在未纳入记录中逐项查看")
     if len({(i['startDate'],i['endDate']) for i in inventory if i['startDate']}) > 1:
         report['warnings'].append('各项目文件的实际交易日期范围不同，请核实是否导出同一期间；没有交易也可能造成范围不同')
     base_errors = sum(bool(r.get('baseError')) for r in records)
@@ -526,3 +569,30 @@ def reconcile_projects(payload):
         report['warnings'].append(f'{len(excluded_period)} 条记录不在选定期间，详见导出报告的期间外记录')
     report['warnings'] = list(dict.fromkeys(report['warnings']))
     return report
+
+
+def build_unit_overview(report, records, known_books, internal_names):
+    """Project cards do not sum differences across both sides as a grand total."""
+    from collections import Counter, defaultdict
+    own=defaultdict(int);opposite=defaultdict(int);counts=Counter();matched=Counter();pending=Counter()
+    for r in records:
+        own[(r['project'],r['currency'])]+=r['amount'];opposite[(r['counterparty'],r['currency'])]+=r['amount'];counts[(r['project'],r['currency'])]+=1
+    for e in report['matched']:
+        for side in ('left','right'):
+            members=e.get(side+'Rows') or ([e[side]] if e.get(side) else [])
+            matched.update((r['project'],r['currency']) for r in members)
+    for category in ('differences','ambiguous','invalid'):
+        for e in report[category]:
+            for side in ('left','right'):
+                if e.get(side):pending[(e[side].get('project',''),e[side].get('currency',''))]+=1
+    output=[]
+    for project in sorted(internal_names):
+        currencies=sorted({c for p,c in set(own)|set(opposite)|set(pending) if p==project}) or ['']
+        for currency in currencies:
+            key=(project,currency)
+            delta=own[key]+opposite[key]
+            status='账簿未提供' if project not in known_books else '原币待核实' if pending[key] or delta else '按导入原币记录一致' if counts[key] else '无有效原币明细'
+            output.append({'project':project,'currency':currency,'ownAmount':own[key],'reciprocalAmount':opposite[key],
+                           'delta':delta,'count':counts[key],'matchedCount':matched[key],'pendingCount':pending[key],
+                           'provided':project in known_books,'status':status})
+    return output

@@ -1,8 +1,8 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
-const state = {datasets: {left: null, right: null}, files: {}, projects: ['p1','p2'], projectNames: {}, accountNames: {}, accountScope: '', nextId: 3, report: null, tab: 'differences', page: 0, busy: false, revision: 0, activeModule: null, projectFilters:{pair:'',currency:''}, views: {bank: {}, projects: {}}};
+const state = {datasets: {left: null, right: null}, files: {}, projects: ['p1','p2'], projectNames: {}, accountNames: {}, accountScope: '', nextId: 3, report: null, tab: 'differences', page: 0, busy: false, revision: 0, activeModule: null, projectFilters:{pair:'',currency:'',project:''}, views: {bank: {}, projects: {}}};
 const fields = {date:'日期 *', debit:'借方 / 收入金额', credit:'贷方 / 支出金额', amount:'带正负号的金额 *', reference:'参考号（凭证号 / 流水号）', description:'摘要（手续费识别依据）', currency:'币种（未选默认 CNY）', account:'账户', project:'本方项目列（可选，优先于填写名称）', counterparty:'对方项目列 *'};
-const tabNames = {differences:'待核实差异', ambiguous:'重复 / 冲突', invalid:'无效数据', matched:'已匹配', fees:'疑似手续费',translationDifferences:'本币金额差异'};
+const tabNames = {differences:'待核实差异', ambiguous:'重复 / 冲突', invalid:'无效数据', matched:'已匹配', fees:'疑似手续费',translationDifferences:'本币金额差异',ledgerExcluded:'未纳入记录'};
 const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = n => n === null || n === undefined ? '—' : (n / 100).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const isProjects = () => state.activeModule === 'projects';
@@ -35,17 +35,18 @@ function configureWorkflow() {
   $('#project-aliases').classList.toggle('hidden',!projectMode);
   $('#project-period').classList.toggle('hidden',!projectMode);
   $('#project-import-check').classList.toggle('hidden',!projectMode);
+  if(projectMode)configureProjectDateRange();else $('#unit-ledger-discovery').classList.add('hidden');
   $('#account-rule').classList.toggle('hidden',projectMode);
   $('#fee-rule').classList.toggle('hidden',projectMode);
-  $('#import-help').textContent=projectMode ? '每个项目一份往来辅助明细账，批量导入最多 20 份、合计 60,000 行。按项目对方与原币币种自动核对，双方借贷相反。' : '请导出同一项目、同一期间的银行存款明细。支持 Excel / CSV，每份最多 10 MB、30,000 条。';
+  $('#import-help').textContent=projectMode ? '可一次导入单位三栏账，自动从账簿名称识别内部单位；也支持分项目文件。按内部单位、往来单位和原币币种核对。' : '请导出同一项目、同一期间的银行存款明细。支持 Excel / CSV，每份最多 10 MB、30,000 条。';
   $('#scope-help').textContent=projectMode ? 'ⓘ 本方 A → 对方 B，只核对 B → A 的反向记录；只比较原币发生额；本币差异单列。双方凭证号通常不同，不建议未经确认就强制一致。' : 'ⓘ 手续费单列后仍保留差异，不自动补账；普通交易不会与手续费混合配平。';
 }
 function renderUploads() {
   configureWorkflow();
   $('#uploads').innerHTML=ids().map((id,index)=>{
     const data=state.datasets[id];
-    const title=isProjects() ? `项目文件 ${index+1}` : ($('#workflow').value==='bank' ? ['账簿明细','银行流水'] : ['内账明细','外账明细'])[index];
-    return `<article class="upload-card"><div class="upload-label"><strong>${esc(title)}</strong>${isProjects()?`<button class="remove-file" data-remove="${id}" aria-label="移除项目文件 ${index+1}">移除</button>`:`<span class="tag">${index===0?'左侧 A':'右侧 B'}</span>`}</div>${isProjects()?`<label class="project-name-label">本方项目名称（无本方项目列时必填）<input type="text" data-project-name="${id}" value="${esc(state.projectNames[id]||'')}" placeholder="例如：项目A"></label>`:`<label class="project-name-label">本文件所属银行账户（无账户列时填写）<input type="text" data-account-name="${id}" value="${esc(state.accountNames[id]||'')}" placeholder="例如：银行账号或统一账户名称"></label>`}<input class="file-input" type="file" id="file-${id}" data-id="${id}" accept=".xlsx,.xls,.csv"><label class="dropzone" for="file-${id}" data-id="${id}" tabindex="0"><span class="file-icon">▧</span><b>${data?esc(data.name):'点击选择文件，或拖放至此'}</b><small>${data?`${data.rows.length.toLocaleString()} 行已读取 · 点击可替换`:'Excel / CSV · 最大 10 MB'}</small></label>${data?renderMapping(data,id):''}</article>`;
+    const title=isProjects() ? (data?.ledgerFormat?'全部账簿总表':`项目文件 ${index+1}`) : ($('#workflow').value==='bank' ? ['账簿明细','银行流水'] : ['内账明细','外账明细'])[index];
+    return `<article class="upload-card"><div class="upload-label"><strong>${esc(title)}</strong>${isProjects()?`<button class="remove-file" data-remove="${id}" aria-label="移除项目文件 ${index+1}">移除</button>`:`<span class="tag">${index===0?'左侧 A':'右侧 B'}</span>`}</div>${isProjects()&&!data?.ledgerFormat?`<label class="project-name-label">本方项目名称（无本方项目列时必填）<input type="text" data-project-name="${id}" value="${esc(state.projectNames[id]||'')}" placeholder="例如：项目A"></label>`:isProjects()?'<p>已从账簿名称列识别本方项目，按各行归属自动拆分。</p>':`<label class="project-name-label">本文件所属银行账户（无账户列时填写）<input type="text" data-account-name="${id}" value="${esc(state.accountNames[id]||'')}" placeholder="例如：银行账号或统一账户名称"></label>`}<input class="file-input" type="file" id="file-${id}" data-id="${id}" accept=".xlsx,.xls,.csv"><label class="dropzone" for="file-${id}" data-id="${id}" tabindex="0"><span class="file-icon">▧</span><b>${data?esc(data.name):'点击选择文件，或拖放至此'}</b><small>${data?`${data.rows.length.toLocaleString()} 行已读取 · 点击可替换`:'Excel / CSV · 最大 10 MB'}</small></label>${data?renderMapping(data,id):''}</article>`;
   }).join('');
   document.querySelectorAll('.file-input[data-id]').forEach(el=>el.addEventListener('change',()=>loadFile(el.dataset.id,el.files[0])));
   document.querySelectorAll('.dropzone').forEach(el=>{
@@ -73,7 +74,7 @@ function refreshAccountScope(){
 function renderMapping(data,id) {
   const keys=['date',...(data.mapping.mode==='signed'?['amount']:['debit','credit']),'reference','description','currency',...(isProjects()?['project','counterparty']:['account'])];
   const labels=isProjects()?{...fields,debit:'原币借方发生额 *',credit:'原币贷方发生额 *',amount:'带正负号的原币发生额 *',currency:'原币币种列 *',description:'摘要'}:fields;
-  return `<div class="mapping">${state.files[id]?`<div class="wide sheet-options"><label>工作表<select data-reparse="sheet" data-id="${id}" id="sheet-${id}" ${data.sheets.length?'':'disabled'}>${data.sheets.map(s=>`<option ${s===data.sheet?'selected':''}>${esc(s)}</option>`).join('')||'<option>CSV</option>'}</select></label><label>表头所在行<input type="number" min="1" max="50" value="${data.firstRow-1}" data-reparse="header" data-id="${id}" id="header-${id}"></label></div>`:''}<label class="wide">金额列格式<select data-id="${id}" data-map="mode"><option value="split" ${data.mapping.mode==='split'?'selected':''}>两列：借方 / 收入，贷方 / 支出</option><option value="signed" ${data.mapping.mode==='signed'?'selected':''}>一列：正数借方 / 收入，负数贷方 / 支出</option></select></label>${keys.map(key=>`<label>${labels[key]}<select data-id="${id}" data-map="${key}">${selectOptions(data.headers,data.mapping[key])}</select></label>`).join('')}</div>${isProjects()?projectAmountControls(data,id):''}<div class="mini-preview">前 3 行预览<div class="table-wrap"><table><thead><tr>${data.headers.slice(0,4).map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${data.rows.slice(0,3).map(row=>`<tr>${data.headers.slice(0,4).map((_,i)=>`<td>${esc(row[i])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>${data.warnings.map(w=>`<div class="warning">${esc(w)}</div>`).join('')}`;
+  return `<div class="mapping">${state.files[id]?`<div class="wide sheet-options"><label>工作表<select data-reparse="sheet" data-id="${id}" id="sheet-${id}" ${data.sheets.length?'':'disabled'}>${data.sheets.map(s=>`<option ${s===data.sheet?'selected':''}>${esc(s)}</option>`).join('')||'<option>CSV</option>'}</select></label>${data.ledgerFormat?'<p>已适配双层表头；保留原 Excel 行号。</p>':`<label>表头所在行<input type="number" min="1" max="50" value="${data.firstRow-1}" data-reparse="header" data-id="${id}" id="header-${id}"></label>`}</div>`:''}<label class="wide">金额列格式<select data-id="${id}" data-map="mode"><option value="split" ${data.mapping.mode==='split'?'selected':''}>两列：借方 / 收入，贷方 / 支出</option><option value="signed" ${data.mapping.mode==='signed'?'selected':''}>一列：正数借方 / 收入，负数贷方 / 支出</option></select></label>${keys.map(key=>`<label>${labels[key]}<select data-id="${id}" data-map="${key}">${selectOptions(data.headers,data.mapping[key])}</select></label>`).join('')}</div>${isProjects()?projectAmountControls(data,id):''}<div class="mini-preview">前 3 行预览<div class="table-wrap"><table><thead><tr>${data.headers.slice(0,4).map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${data.rows.slice(0,3).map(row=>`<tr>${data.headers.slice(0,4).map((_,i)=>`<td>${esc(row[i])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>${data.warnings.map(w=>`<div class="warning">${esc(w)}</div>`).join('')}`;
 }
 function fileBase64(file) { return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('无法读取文件'));reader.readAsDataURL(file);}); }
 async function loadFile(id,file) {
@@ -91,6 +92,7 @@ async function loadFile(id,file) {
     if(projectFile&&(!state.projectNames[id]||state.projectNames[id]===previous?.fileProjectName))state.projectNames[id]=fileProjectName;
     state.datasets[id]={...data,id,name:file.name,fileProjectName,mapping:projectFile?inferProject(data.headers):infer(data.headers),originalConfirmed:false,currencyName:'',baseCurrencyName:''};
     state.files[id]={name:file.name,content};
+    if(data.ledgerFormat){if(!state.projects.some(key=>key!==id&&state.datasets[key]))state.projects=[id];$('#days').value='unlimited';$('#project-date-range').value='unlimited';configureProjectDateRange();}
     success=true;notice();
   } catch(error) { notice(error.message); }
   finally {state.busy=false;renderUploads();}
@@ -99,11 +101,11 @@ async function loadFile(id,file) {
 async function reparse(id) {
   if(state.busy)return;
   const sheet=$(`#sheet-${id}`).value;
-  const headerRow=Number($(`#header-${id}`).value);
+  const headerInput=$(`#header-${id}`);const headerRow=headerInput?Number(headerInput.value):undefined;
   state.busy=true;invalidate();
   try {
-    const data=await api('/api/parse',{...state.files[id],sheet,headerRow});
-    state.datasets[id]={...state.datasets[id],...data,id,name:state.files[id].name,mapping:state.projects.includes(id)?inferProject(data.headers):infer(data.headers),originalConfirmed:false};
+    const data=await api('/api/parse',{...state.files[id],sheet,headerRow,autoHeader:state.projects.includes(id)});
+    state.datasets[id]={...state.datasets[id],ledgerFormat:null,ledgerBooks:[],ledgerBookStats:[],ledgerSummaryRows:[],ledgerZeroOriginalRows:[],rowNumbers:undefined,ledgerCounts:null,...data,id,name:state.files[id].name,mapping:state.projects.includes(id)?inferProject(data.headers):infer(data.headers),originalConfirmed:false};
     notice();
   } catch(error) {state.datasets[id]=null;notice(error.message+'；请重新选择文件。');}
   finally {state.busy=false;renderUploads();}
@@ -134,14 +136,15 @@ function renderReport() {
   const clean=report.matched.length+report.fees.length>0 && !report.differences.length && !report.ambiguous.length && !report.invalid.length && !feePending;
   $('#result-summary').textContent=(report.mode==='projects'?`${report.counts.files} 份文件 · ${report.counts.projects} 个本方项目 · ${report.counts.rows} 条明细。`:`左侧 ${report.counts.left} 条 · 右侧 ${report.counts.right} 条 · 银行账户：${report.accountScope||'未选择'}。`)+(clean?'所有有效明细均已按当前规则配对，请结合原始凭证确认。':'待核实项、重复候选及无效数据请逐项确认，合计相等不代表逐笔一致。');
   const stats=[['matched','green','组普通记录配对（含组合）'],['differences','red','项普通记录待核实'],['ambiguous','amber','条普通记录需人工配对'],['invalid','','条未参与金额比较']];
+  if(report.mode==='projects'&&report.ledgerExcluded?.length)stats.push(['ledgerExcluded','','汇总、待确认单位和零原币记录']);
   if(report.mode==='projects')stats.push(['translationDifferences','','项不影响原币匹配结论']);
   if(report.mode!=='projects')stats.push(['fees','amber',`${feePending} 项尚待核实，单独列示`]);
   $('#stats').innerHTML=stats.map(([key,color,hint])=>`<div class="stat ${color}"><span class="stat-label">${tabNames[key]}</span><strong>${(report[key]||[]).length.toLocaleString()}</strong><small>${hint}</small></div>`).join('');
   $('#report-warnings').textContent=[...new Set(report.warnings)].join('\n');$('#report-warnings').classList.toggle('hidden',!report.warnings.length);
   $('#totals').classList.toggle('hidden',report.mode==='projects');
   $('#totals').innerHTML=report.totals.length?report.totals.map(t=>`<div class="total-line"><span>${esc(t.currency)} 全部有效明细净额（含手续费）</span><span>左侧 <b>${fmt(t.left)}</b></span><span>右侧 <b>${fmt(t.right)}</b></span><span>规则调整后差额 <b>${fmt(t.delta)}</b></span></div>`).join(''):'没有有效明细可计算合计，请检查无效数据。';
-  renderFeeSummary(report);renderProjectSummary(report);renderProjectFilter(report);
-  $('#tabs').innerHTML=Object.keys(tabNames).filter(key=>key==='fees'?report.mode!=='projects':key==='translationDifferences'?report.mode==='projects':true).map(key=>`<button data-tab="${key}" class="${state.tab===key?'active':''}">${tabNames[key]} ${(report[key]||[]).length}</button>`).join('');
+  renderFeeSummary(report);renderProjectSummary(report);renderProjectFilter(report);renderUnitProjectOverview(report);
+  $('#tabs').innerHTML=Object.keys(tabNames).filter(key=>key==='fees'?report.mode!=='projects':(key==='translationDifferences'||key==='ledgerExcluded')?report.mode==='projects':true).map(key=>`<button data-tab="${key}" class="${state.tab===key?'active':''}">${tabNames[key]} ${(report[key]||[]).length}</button>`).join('');
   document.querySelectorAll('[data-tab]').forEach(el=>el.addEventListener('click',()=>{state.tab=el.dataset.tab;state.page=0;renderReport();}));renderRows();
 }
 function renderRows() {
@@ -164,7 +167,7 @@ function getAliases() {
   }
   return result;
 }
-function options() { return {direction:$('#direction').value,days:Number($('#days').value),strictReference:$('#strictReference').checked,matchAccount:!isProjects(),accountScope:state.accountScope,oneToMany:$('#oneToMany').checked,maxParts:Number($('#maxParts').value),separateFees:!isProjects()&&$('#separateFees').checked,feeKeywords:$('#feeKeywords').value,...(isProjects()?{startDate:$('#project-start').value,endDate:$('#project-end').value}:{})}; }
+function options() { return {direction:$('#direction').value,days:$('#days').value==='unlimited'?'unlimited':Number($('#days').value),strictReference:$('#strictReference').checked,matchAccount:!isProjects(),accountScope:state.accountScope,oneToMany:$('#oneToMany').checked,maxParts:Number($('#maxParts').value),separateFees:!isProjects()&&$('#separateFees').checked,feeKeywords:$('#feeKeywords').value,...(isProjects()?{dateRangeMode:$('#project-date-range').value,startDate:$('#project-start').value,endDate:$('#project-end').value,additionalInternalUnits:$('#additional-internal-units').value.split('\n').map(n=>n.trim()).filter(Boolean)}:{})}; }
 $('#run').addEventListener('click',async()=>{
   if(state.busy)return;
   state.busy=true;$('#run').disabled=true;$('#run').textContent='正在核对…';notice();
@@ -174,13 +177,13 @@ $('#run').addEventListener('click',async()=>{
     const payload=projectMode?{datasets:state.projects.filter(id=>state.datasets[id]).map(id=>({...state.datasets[id],projectName:state.projectNames[id]||''})),aliases:getAliases(),options:options()}:{left:{...state.datasets.left,accountName:state.accountNames.left||''},right:{...state.datasets.right,accountName:state.accountNames.right||''},options:options()};
     const report=await api(projectMode?'/api/projects':'/api/reconcile',payload);
     if(revision!==state.revision){notice('核对期间规则发生变化，请按新规则重新核对。');return;}
-    state.projectFilters={pair:'',currency:''};state.report=report;state.tab='differences';state.page=0;$('#search').value='';renderReport();$('#results').scrollIntoView({behavior:'smooth',block:'start'});
+    state.projectFilters={pair:'',currency:'',project:''};state.report=report;state.tab='differences';state.page=0;$('#search').value='';renderReport();$('#results').scrollIntoView({behavior:'smooth',block:'start'});
   } catch(error) {notice(error.message);}
   finally {state.busy=false;$('#run').disabled=!ready();$('#run').innerHTML='开始核对 <span>→</span>';}
 });
 $('#accountScope').addEventListener('change',()=>{state.accountScope=$('#accountScope').value;invalidate();});
 $('#workflow').addEventListener('change',()=>{invalidate();renderUploads();});
-['#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end'].forEach(id=>$(id).addEventListener('input',invalidate));
+['#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end','#project-date-range','#additional-internal-units'].forEach(id=>$(id).addEventListener('input',invalidate));
 $('#add-project').addEventListener('click',()=>{if(state.busy)return;if(addProject()){invalidate();renderUploads();}});
 $('#project-batch').addEventListener('change',async event=>{
   const files=[...event.target.files];
@@ -210,7 +213,7 @@ $('#export').addEventListener('click',()=>{
   download(new Blob(['\uFEFF'+lines.map(line=>line.map(safe).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8;'}),`核对明细_${new Date().toISOString().slice(0,10)}.csv`);
 });
 function demoDataset(id,name,headers,rows,projectName='') {state.datasets[id]={id,name,headers,rows,firstRow:2,sheets:[],sheet:'',warnings:[],mapping:projectName?inferProject(headers):infer(headers),originalConfirmed:!!projectName,currencyName:projectName?'CNY':''};delete state.files[id];if(projectName)state.projectNames[id]=projectName;}
-function resetDemoOptions() {$('#days').value='0';$('#strictReference').checked=false;$('#matchAccount').checked=false;$('#oneToMany').checked=true;$('#maxParts').value='5';$('#separateFees').checked=true;$('#aliases').value='';$('#project-start').value='';$('#project-end').value='';}
+function resetDemoOptions() {$('#days').value='0';$('#strictReference').checked=false;$('#matchAccount').checked=false;$('#oneToMany').checked=true;$('#maxParts').value='5';$('#separateFees').checked=true;$('#aliases').value='';$('#project-start').value='';$('#project-end').value='';$('#project-date-range').value='unlimited';$('#additional-internal-units').value='';}
 $('#demo').addEventListener('click',()=>{
   if(state.busy)return;
   const headers=['日期','摘要','借方金额','贷方金额','参考号'];
@@ -229,7 +232,7 @@ $('#project-demo').addEventListener('click',()=>{
   demoDataset('p3','项目C.xlsx',headers,[['2026-01-06','项目A','收到A项目','USD','','490','CNY','','3528','AC1','2241','其他应付款'],['2026-01-08','项目B','收到B项目','USD','','200','CNY','','1440','C2','2241','其他应付款']],'项目C');
   resetDemoOptions();$('#direction').value='reverse';invalidate();renderUploads();notice('虚构多项目示例：A↔B 原币 USD 1000 对 600＋400 一致，本币相差 CNY 100；A↔C 原币差 USD 10，缺少 D 项目账簿。点击「开始核对」。');
 });
-const RULE_IDS = ['#workflow','#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end'];
+const RULE_IDS = ['#workflow','#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end','#project-date-range','#additional-internal-units'];
 function saveView() {
   if(!state.activeModule||state.activeModule==='cashflow')return;
   const controls={};
@@ -286,13 +289,13 @@ function inferProject(headers){
   if(signedOriginal&&!find(h=>original(h)&&/(借方|贷方)/.test(h))){mapping.mode='signed';mapping.debit='';mapping.credit='';}
   if(!mapping.debit&&!mapping.credit&&mapping.amount)mapping.mode='signed';
   mapping.currency=find(h=>/^(原币币种|原币币别|外币币种|交易币种|币种|币别|币种名称|币种编码|币别名称|货币|currency)$/i.test(h))||mapping.currency;
-  mapping.project=find(h=>/^(本方项目|本方账套|账套名称|所属项目|本项目|项目名称|project)$/i.test(h))||mapping.project;
+  mapping.project=find(h=>/^(本方项目|本方账套|账套名称|账簿名称|所属项目|本项目|项目名称|project)$/i.test(h))||mapping.project;
   mapping.counterparty=find(h=>/^(对方项目|对方项目名称|往来项目|往来单位|往来单位名称|对方单位|辅助核算对象|客户名称|供应商名称)$/i.test(h))||mapping.counterparty;
   mapping.baseDebit=find(h=>base(h)&&h.includes('借方'));
   mapping.baseCredit=find(h=>base(h)&&h.includes('贷方'));
   mapping.baseAmount=find(h=>base(h)&&!/(借方|贷方)/.test(h)&&/(金额|发生额)/.test(h));
   mapping.baseCurrency=find(h=>/^(本币币种|本币币别|本位币币种|记账本位币)$/.test(h));
-  mapping.subjectCode=find(h=>/^(科目编码|科目代码|会计科目编码)$/.test(h));
+  mapping.subjectCode=find(h=>/^(科目编码|科目代码|科目编号|会计科目编码)$/.test(h));
   mapping.subjectName=find(h=>/^(科目名称|会计科目|会计科目名称)$/.test(h));
   return mapping;
 }
@@ -318,18 +321,37 @@ function renderProjectImportCheck(){
   if(!isProjects())return;
   const datasets=state.projects.filter(id=>state.datasets[id]);
   const pending=datasets.filter(id=>projectSetupIssues(state.datasets[id],id).length).length;
+  renderUnitDiscovery();
   $('#project-import-check').innerHTML=`<div class="project-check-heading"><strong>${datasets.length} 份文件已导入 · ${pending} 份待确认</strong><span>从文件名预填本方项目；如文件名带日期或报表名称，请修改为标准项目名。</span></div>${datasets.length?`<div class="table-wrap"><table class="summary-table"><thead><tr><th>文件 / 本方项目</th><th>所选原币金额列</th><th>原币币种来源</th><th>条数</th><th>导入状态</th></tr></thead><tbody>${datasets.map(id=>{const d=state.datasets[id],issues=projectSetupIssues(d,id);return `<tr><td>${esc(d.name)}<small>${d.mapping.project?'按 '+esc(d.mapping.project)+' 列':esc(state.projectNames[id])}</small></td><td>${esc(projectOriginalNames(d).join(' / '))||'未选择'}</td><td>${esc(d.mapping.currency||d.currencyName||'未指定')}</td><td>${d.rows.length}</td><td class="reason">${issues.length?issues.map(esc).join('；'):'原币字段已确认，可参与核对'}</td></tr>`;}).join('')}</tbody></table></div>`:''}`;
 }
 function projectFiltered(rows){
   if(!state.report||state.report.mode!=='projects')return rows;
-  return rows.filter(r=>{const pair=r.pair||(r.projectA?`${r.projectA} ↔ ${r.projectB}`:'');const currency=r.currency||(r.left||r.right)?.currency;return (!state.projectFilters.pair||state.projectFilters.pair===pair)&&(!state.projectFilters.currency||state.projectFilters.currency===currency);});
+  return rows.filter(r=>{const pair=r.pair||(r.projectA?`${r.projectA} ↔ ${r.projectB}`:'');const currency=r.currency||(r.left||r.right)?.currency;const unit=state.projectFilters.project;const involves=!unit||r.project===unit||r.projectA===unit||r.projectB===unit||[r.left?.project,r.left?.counterparty,r.right?.project,r.right?.counterparty].includes(unit);return involves&&(!state.projectFilters.pair||state.projectFilters.pair===pair)&&(!state.projectFilters.currency||state.projectFilters.currency===currency);});
 }
 function renderProjectFilter(report){
   $('#project-result-filter').classList.toggle('hidden',report.mode!=='projects');
   if(report.mode!=='projects')return;
+  $('#project-unit-filter').innerHTML='<option value="">全部项目</option>'+[...new Set((report.unitDiscovery||report.projects||[]))].map(p=>`<option ${p===state.projectFilters.project?'selected':''}>${esc(p)}</option>`).join('');
   const pairs=[...new Set(report.projectPairs.map(r=>`${r.projectA} ↔ ${r.projectB}`))],currencies=[...new Set(report.projectPairs.map(r=>r.currency))];
   $('#project-pair-filter').innerHTML='<option value="">全部组合</option>'+pairs.map(p=>`<option ${p===state.projectFilters.pair?'selected':''}>${esc(p)}</option>`).join('');
   $('#project-currency-filter').innerHTML='<option value="">全部币种</option>'+currencies.map(c=>`<option ${c===state.projectFilters.currency?'selected':''}>${esc(c)}</option>`).join('');
 }
 $('#project-pair-filter').addEventListener('change',()=>{state.projectFilters.pair=$('#project-pair-filter').value;state.page=0;renderReport();});
 $('#project-currency-filter').addEventListener('change',()=>{state.projectFilters.currency=$('#project-currency-filter').value;state.page=0;renderReport();});
+
+function configureProjectDateRange(){const unlimited=$('#project-date-range').value==='unlimited';$('#project-start').disabled=unlimited;$('#project-end').disabled=unlimited;}
+$('#project-date-range').addEventListener('change',()=>{configureProjectDateRange();invalidate();});
+$('#project-unit-filter').addEventListener('change',()=>{state.projectFilters.project=$('#project-unit-filter').value;state.projectFilters.pair='';state.page=0;renderReport();});
+$('#project-consolidated').addEventListener('change',async event=>{const file=event.target.files[0];if(!file||state.busy){event.target.value='';return;}if(state.projects.some(key=>state.datasets[key])){notice('当前已有项目文件。为避免与总表重复，请先移除已有文件或刷新后再上传；替换同一总表也可点击已有文件卡片更换。');event.target.value='';return;}let id=state.projects.find(key=>!state.datasets[key]);if(!id)id=addProject();if(id){renderUploads();await loadFile(id,file);}event.target.value='';});
+function renderUnitDiscovery(){
+ const datasets=state.projects.map(id=>state.datasets[id]).filter(d=>d?.ledgerFormat);
+ const area=$('#unit-ledger-discovery');area.classList.toggle('hidden',!datasets.length||!isProjects());if(!datasets.length)return;
+ const books=new Map();for(const d of datasets)for(const b of d.ledgerBookStats||[])books.set(b.project,b);
+ area.innerHTML=`<div class="panel-heading"><div><h2>已从账簿名称识别 ${books.size} 个内部单位</h2><p>自动比对这些账簿与同名往来单位。未命中名称的明细先列为归属待确认；可通过名称对照或补充内部单位调整。</p></div></div><details><summary>查看内部单位清单及导入分类</summary><div class="table-wrap"><table class="summary-table"><thead><tr><th>内部单位 / 项目</th><th>逐笔明细</th><th>名称命中的内部明细</th><th>单位归属待确认</th></tr></thead><tbody>${[...books.values()].map(b=>`<tr><td>${esc(b.project)}</td><td>${b.count}</td><td>${b.internalCount}</td><td>${b.unconfirmedCount}</td></tr>`).join('')}</tbody></table></div><p>此处按导入名称精确匹配预览；最终以名称对照及核对结果为准。期初、累计、合计行单独保留，不混入发生额。</p></details>`;
+}
+function renderUnitProjectOverview(report){
+ const area=$('#unit-project-overview');area.classList.toggle('hidden',report.mode!=='projects'||!report.unitOverview?.length);if(report.mode!=='projects')return;
+ const rows=(report.unitOverview||[]).filter(r=>(!state.projectFilters.project||r.project===state.projectFilters.project)&&(!state.projectFilters.currency||r.currency===state.projectFilters.currency));
+ area.innerHTML=`<div class="panel-heading"><div><h2>按项目列示核对结果</h2><p>每个项目按原币币种独立列示，原币差额 = 本方发生净额 + 对方账簿对应净额。各项目差额含同一往来的双方视角，不应再相加作为总差额。</p></div></div><div class="table-wrap"><table class="summary-table"><thead><tr><th>项目 / 内部单位</th><th>原币</th><th>本方明细</th><th>已匹配笔数</th><th>待核实记录</th><th class="numeric">本方发生净额</th><th class="numeric">对方对应净额</th><th class="numeric">原币差额</th><th>状态</th></tr></thead><tbody>${rows.map(r=>`<tr><td><button class="project-link" data-open-unit="${esc(r.project)}">${esc(r.project)}</button></td><td>${esc(r.currency)||'无有效明细'}</td><td>${r.count}</td><td>${r.matchedCount}</td><td>${r.pendingCount}</td><td class="numeric">${fmt(r.ownAmount)}</td><td class="numeric">${fmt(r.reciprocalAmount)}</td><td class="numeric">${fmt(r.delta)}</td><td>${esc(r.status)}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">当前筛选无项目</td></tr>'}</tbody></table></div>`;
+ area.querySelectorAll('[data-open-unit]').forEach(el=>el.addEventListener('click',()=>{state.projectFilters.project=el.dataset.openUnit;state.projectFilters.pair='';state.tab='differences';state.page=0;renderReport();$('.report-panel').scrollIntoView({behavior:'smooth'});}));
+}

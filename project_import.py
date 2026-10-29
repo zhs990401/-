@@ -7,6 +7,9 @@ from reconcile import money
 
 def currency_name(value):
     name = re.sub(r'\s+', '', str(value or '')).upper()
+    code = re.match(r'^\(?([A-Z]{3})\)?(?:[-—－_：:（(].*)?$', name)
+    if code:
+        return 'CNY' if code.group(1)=='RMB' else code.group(1)
     return {'人民币':'CNY','RMB':'CNY','美元':'USD','美金':'USD','US$':'USD',
             '欧元':'EUR','港币':'HKD','港元':'HKD','日元':'JPY','英镑':'GBP'}.get(name, name)
 

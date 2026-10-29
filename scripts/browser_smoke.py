@@ -168,6 +168,7 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#header-p1')).to_have_value('2')
     expect(page.locator('#sheet-p1')).to_have_value('往来明细')
     expect(page.locator('#project-import-check')).to_contain_text('0 份待确认')
+    page.locator('#project-date-range').select_option('custom')
     page.locator('#project-start').fill('2026-01-01')
     page.locator('#project-end').fill('2026-01-31')
     page.locator('#run').click()
@@ -197,6 +198,56 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#results')).to_be_visible()
     assert page.locator('.stat strong').all_text_contents()==['1','0','0','0','0']
 
+    # One combined 单位三栏账 discovers books and splits all internal units automatically.
+    page.reload()
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('fictional_unit_fixture',Path(__file__).resolve().parents[1]/'tests/unit_ledger_fixture.py')
+    fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+    content=fixture.fixture_bytes()
+    page.locator('#project-consolidated').set_input_files(upload('单位三栏账.xlsx',content))
+    expect(page.locator('#unit-ledger-discovery')).to_contain_text('3 个内部单位')
+    expect(page.locator('#uploads .upload-card')).to_have_count(1)
+    expect(page.locator('#days')).to_have_value('unlimited')
+    expect(page.locator('#project-date-range')).to_have_value('unlimited')
+    expect(page.locator('#project-start')).to_be_disabled()
+    expect(page.locator('#run')).to_be_enabled()
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    expect(page.locator('#unit-project-overview')).to_contain_text('甲项目')
+    expect(page.locator('#unit-project-overview')).to_contain_text('乙项目')
+    expect(page.locator('#unit-project-overview')).to_contain_text('丙项目')
+    expect(page.locator('#unit-project-overview tbody tr')).to_have_count(4)
+    expect(page.locator('#report-warnings')).to_contain_text('同名本单位往来 1 条')
+    page.get_by_role('button',name='未纳入记录 6',exact=True).click()
+    expect(page.locator('#report-body tr')).to_have_count(6)
+    page.get_by_role('button',name='已匹配 1',exact=True).click()
+    expect(page.locator('#report-body')).to_contain_text('日期无限制')
+    page.locator('[data-open-unit="甲项目"]').first.click()
+    expect(page.locator('#project-unit-filter')).to_have_value('甲项目')
+    expect(page.locator('#unit-project-overview tbody tr')).to_have_count(2)
+    with page.expect_download() as info:
+        page.locator('#export-excel').click()
+    dest=Path(output)/'combined.xlsx';info.value.save_as(dest)
+    wb=openpyxl.load_workbook(dest)
+    assert wb['内部单位清单'].max_row==4
+    assert wb['未纳入内部核对'].max_row==7
+    wb.close()
+    page.locator('#project-unit-filter').select_option('')
+    page.locator('#project-consolidated').set_input_files(upload('单位三栏账.xlsx',content))
+    expect(page.locator('#notice')).to_contain_text('当前已有项目文件')
+    expect(page.locator('#uploads .upload-card')).to_have_count(1)
+    expect(page.locator('#results')).to_be_visible()
+    page.locator('#days').select_option('0')
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').first.inner_text()=='0'
+    page.locator('#days').select_option('unlimited')
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').first.inner_text()=='1'
+    page.evaluate('window.scrollTo(0,0)')
+    page.screenshot(path='/tmp/中国港湾-总表自动核对-虚构数据.png',full_page=True)
+
     # Bank reconciliation is constrained to one explicit account, including report totals.
     page.locator('#nav-bank').click()
     bank_headers=['日期','账户','收入金额','支出金额','流水号']
@@ -217,6 +268,10 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#results')).to_be_visible()
     assert page.locator('.stat strong').all_text_contents()==['0','1','0','0','0']
 
+    page.locator('#days').select_option('unlimited')
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+
     # Cash-flow demo, project/month totals, graph, reports, and per-module persistence.
     page.locator('#nav-cashflow').click()
     expect(page.locator('#feature-title')).to_have_text('项目现金流统计')
@@ -228,6 +283,15 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#cf-summary-body')).to_contain_text('700.00')
     expect(page.locator('#cf-warnings')).to_contain_text('未分类记录 1 条')
     expect(page.locator('#cf-monthly-body tr')).to_have_count(6)
+    page.locator('#cf-end-policy').select_option('unlimited')
+    expect(page.locator('#cf-end')).to_be_disabled()
+    page.locator('#cf-run').click()
+    expect(page.locator('#cf-results')).to_be_visible()
+    expect(page.locator('#cf-result-description')).to_contain_text('2026-03-03')
+    page.locator('#cf-end-policy').select_option('custom')
+    page.locator('#cf-end').fill('2026-03-31')
+    page.locator('#cf-run').click()
+    expect(page.locator('#cf-results')).to_be_visible()
     page.locator('#cf-project-filter').select_option(label='项目A / CNY')
     expect(page.locator('#cf-chart svg')).to_be_visible()
     expect(page.locator('#cf-monthly-body tr')).to_have_count(3)
@@ -279,4 +343,4 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#cf-details tr')).to_have_count(2)
     assert not errors, errors
     browser.close()
-    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; original/base currency separation, auto header and filename inference, period filtering, mapping reuse, project/currency filters and template download; no JavaScript errors.')
+    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; original/base currency separation, combined three-column ledger upload, automatic internal-unit discovery, project overview, explicit unlimited date controls, auto headers, mapping reuse, project/currency filters and template download; no JavaScript errors.')

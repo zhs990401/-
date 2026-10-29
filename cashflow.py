@@ -60,7 +60,7 @@ def calculate_cashflow(payload):
     if sum(abs(o['balance']) for o in openings.values()) + sum(abs(r['amount']) for r in records) > 9_000_000_000_000_000:
         raise ValueError('期初余额与流水总额超出精确范围，请缩小项目范围')
     options = payload.get('options', {})
-    end_text = str(options.get('endDate', '')).strip()
+    end_text = '' if options.get('endDateMode')=='unlimited' else str(options.get('endDate', '')).strip()
     dates = [day(r['date']) for r in records] + [day(o['date']) for o in openings.values()]
     if not dates:
         raise ValueError('没有可统计的日期，请检查流水和期初设置')
@@ -162,7 +162,7 @@ def calculate_cashflow(payload):
     return {'mode': 'cashflow', 'summaries': summaries, 'monthly': monthly, 'transactions': accepted,
             'openings': list(openings.values()), 'invalid': invalid, 'unclassified': unclassified, 'duplicates': duplicates,
             'excluded': excluded, 'totals': totals, 'warnings': list(dict.fromkeys(warnings)),
-            'options': {'endDate': end.isoformat(), 'includeDuplicates': include_duplicates},
+            'options': {'endDateMode':options.get('endDateMode','custom' if end_text else 'unlimited'),'endDate': end.isoformat(), 'includeDuplicates': include_duplicates},
             'counts': {'files': len(datasets), 'input': len(records) + len(invalid), 'included': len(accepted), 'projects': len({s['project'] for s in summaries})}}
 
 
