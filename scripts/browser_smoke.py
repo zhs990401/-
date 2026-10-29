@@ -272,6 +272,48 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     page.locator('#run').click()
     expect(page.locator('#results')).to_be_visible()
 
+    # Repeated equal amounts match by count without inventing transaction pairings.
+    count_headers=['日期','账户','收入金额','支出金额','流水号']
+    left_repeats=xlsx(count_headers,[[datetime(2026,1,1),'COUNT-A',100,None,''],[datetime(2026,1,1),'COUNT-A',100,None,'']])
+    right_repeats=xlsx(count_headers,[[datetime(2026,3,1),'COUNT-A',100,None,''],[datetime(2026,3,1),'COUNT-A',100,None,'']])
+    for side,content in [('left',left_repeats),('right',right_repeats)]:
+        page.locator('#file-'+side).set_input_files(upload('count_'+side+'.xlsx',content))
+        expect(page.locator('#file-'+side).locator('..').locator('.dropzone b')).to_have_text('count_'+side+'.xlsx')
+    page.locator('#accountScope').select_option('COUNT-A')
+    page.locator('#days').select_option('unlimited')
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents()==['1','0','0','0','0']
+    expect(page.locator('#duplicate-count-summary')).to_contain_text('金额及数量一致，按组匹配')
+    expect(page.locator('#result-summary')).to_contain_text('1 组金额数量匹配')
+    page.get_by_role('button',name='已匹配 1',exact=True).click()
+    expect(page.locator('#report-body')).to_contain_text('组内未指定逐笔对应')
+    expect(page.locator('#report-body')).to_contain_text('2 笔')
+    with page.expect_download() as info:
+        page.locator('#export-excel').click()
+    dest=Path(output)/'quantity.xlsx';info.value.save_as(dest)
+    wb=openpyxl.load_workbook(dest)
+    assert wb['已匹配'].max_row==5
+    assert wb['重复金额数量核对'].max_row==2
+    columns=[c.value for c in wb['已匹配'][1]]
+    li,ri=columns.index('左侧文件'),columns.index('右侧文件')
+    assert all(bool(r[li])!=bool(r[ri]) for r in wb['已匹配'].iter_rows(min_row=2,values_only=True))
+    wb.close()
+    page.locator('#duplicate-counts').uncheck()
+    expect(page.locator('#results')).to_be_hidden()
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents()==['0','0','4','0','0']
+    page.locator('#duplicate-counts').check()
+    right_one=xlsx(count_headers,[[datetime(2026,3,1),'COUNT-A',100,None,'']])
+    page.locator('#file-right').set_input_files(upload('count_right_one.xlsx',right_one))
+    expect(page.locator('#file-right').locator('..').locator('.dropzone b')).to_have_text('count_right_one.xlsx')
+    page.locator('#run').click()
+    expect(page.locator('#results')).to_be_visible()
+    assert page.locator('.stat strong').all_text_contents()==['0','0','3','0','0']
+    expect(page.locator('#duplicate-count-summary')).to_contain_text('数量不一致，人工复核')
+    expect(page.locator('#duplicate-count-summary')).to_contain_text('原始左 2 笔 / 右 1 笔')
+
     # Cash-flow demo, project/month totals, graph, reports, and per-module persistence.
     page.locator('#nav-cashflow').click()
     expect(page.locator('#feature-title')).to_have_text('项目现金流统计')
@@ -306,7 +348,7 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
         page.locator('#cf-save').click()
     work=Path(output)/'work.json';info.value.save_as(work)
     page.locator('#nav-bank').click()
-    expect(page.locator('#accountScope')).to_have_value('BANK-A')
+    expect(page.locator('#accountScope')).to_have_value('COUNT-A')
     expect(page.locator('#results')).to_be_visible()
     page.locator('#nav-cashflow').click()
     expect(page.locator('#cf-results')).to_be_visible()
@@ -343,4 +385,4 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     expect(page.locator('#cf-details tr')).to_have_count(2)
     assert not errors, errors
     browser.close()
-    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; original/base currency separation, combined three-column ledger upload, automatic internal-unit discovery, project overview, explicit unlimited date controls, auto headers, mapping reuse, project/currency filters and template download; no JavaScript errors.')
+    print('Browser checks passed: China Harbour platform title, separate sidebar modules with independent data/rules/results/search, URL restoration, bank fee/refund stats, group members, XLSX/CSV export, batch upload, aliases, missing project warnings, HTML escaping, mobile layout, single-bank-account scope, project/month cashflow, graphs, local workpack restore and duplicate upload review; original/base currency separation, combined three-column ledger upload, automatic internal-unit discovery, project overview, explicit unlimited date controls, auto headers, mapping reuse, project/currency filters and template download; repeated-amount equal/unequal counts, count-rule toggle and non-pairwise group export; no JavaScript errors.')

@@ -107,7 +107,7 @@ def settings(options):
         raise ValueError('请填写至少一个手续费识别关键词')
     return {**options, 'days': tolerance, 'direction': 'reverse' if options.get('direction') == 'reverse' else 'same',
             'strictReference': bool(options.get('strictReference')), 'matchAccount': bool(options.get('matchAccount')),
-            'oneToMany': bool(options.get('oneToMany')), 'maxParts': max_parts,
+            'matchDuplicateCounts': options.get('matchDuplicateCounts') is not False, 'oneToMany': bool(options.get('oneToMany')), 'maxParts': max_parts,
             'separateFees': bool(options.get('separateFees')), 'feeKeywords': ','.join(keywords)}
 
 
@@ -242,10 +242,19 @@ def compare_records(left, right, options):
             used_l.add(i)
             used_r.add(j)
             matched.append(item(left[i], right[j], ('金额、币种符合规则；日期无限制' if tolerance == 'unlimited' else '金额、币种和日期符合规则') + ('；参考号一致' if left[i]['reference'] and left[i]['reference'] == right[j]['reference'] else ''), delta=0, matchType='one_to_one'))
+    count_l,count_r,count_checks,deferred={},{},[],[]
+    if options['matchDuplicateCounts']:
+        from duplicate_counts import match_duplicate_counts
+        count_matches,count_l,count_r,count_checks,deferred=match_duplicate_counts(left,right,used_l,used_r,options)
+        for il,ir,check in count_matches:
+            a,b=[left[i] for i in il],[right[j] for j in ir]
+            used_l.update(il);used_r.update(ir)
+            matched.append(item(aggregate(a),aggregate(b),check['reason'],delta=0,matchType='amount_count',statisticalMatch=True,
+                                leftCount=len(a),rightCount=len(b),leftRows=a,rightRows=b))
     group_l, group_r, group_warning = set(), set(), ''
     if options['oneToMany']:
-        remaining_l = {i for i in range(len(left)) if i not in used_l and not lc[i]}
-        remaining_r = {j for j in range(len(right)) if j not in used_r and not rc[j]}
+        remaining_l = {i for i in range(len(left)) if i not in used_l and i not in count_l and not lc[i]}
+        remaining_r = {j for j in range(len(right)) if j not in used_r and j not in count_r and not rc[j]}
         groups, group_l, group_r, group_warning = group_search(left, right, remaining_l, remaining_r, options)
         if group_warning:
             warnings.append(group_warning)
@@ -263,12 +272,16 @@ def compare_records(left, right, options):
     for reference in sorted(refs_l.keys() & refs_r.keys()):
         if len(refs_l[reference]) == len(refs_r[reference]) == 1:
             i, j = refs_l[reference][0], refs_r[reference][0]
-            if lc[i] or rc[j] or i in group_l or j in group_r:
+            if lc[i] or rc[j] or i in group_l or j in group_r or i in count_l or j in count_r:
                 continue
             delta = left[i]['amount'] - right[j]['amount'] * factor
             differences.append(item(left[i], right[j], '参考号一致，金额差异' if delta else '参考号一致，日期超出容差', delta=delta))
             used_l.add(i)
             used_r.add(j)
+    if deferred:
+        from duplicate_counts import finish_deferred_counts
+        late_l,late_r,late_checks=finish_deferred_counts(deferred,used_l,used_r,options)
+        count_l.update(late_l);count_r.update(late_r);count_checks.extend(late_checks)
     for side, records, used, candidate_list, group_ambiguous in (
         ('left', left, used_l, lc, group_l), ('right', right, used_r, rc, group_r)
     ):
@@ -276,12 +289,12 @@ def compare_records(left, right, options):
             if i in used:
                 continue
             a, b = (r, None) if side == 'left' else (None, r)
-            if candidate_list[i] or i in group_ambiguous:
-                reason = group_warning if i in group_ambiguous and group_warning else '存在重复或组合冲突，无法唯一配对，请人工复核'
+            if candidate_list[i] or i in group_ambiguous or i in (count_l if side=='left' else count_r):
+                reason = group_warning if i in group_ambiguous and group_warning else (count_l if side=='left' else count_r).get(i,'存在重复或组合冲突，无法唯一配对，请人工复核')
                 ambiguous.append(item(a, b, reason))
             else:
                 differences.append(item(a, b, '对侧未找到符合规则的记录（可能漏记、日期差异或金额差异）'))
-    return {'matched': matched, 'differences': differences, 'ambiguous': ambiguous, 'warnings': warnings}
+    return {'matched': matched, 'differences': differences, 'ambiguous': ambiguous, 'warnings': warnings,'duplicateAmountChecks':count_checks}
 
 
 def currency_totals(left, right, factor):
@@ -338,6 +351,7 @@ def reconcile(payload):
             stats[prefix + 'Expense'] = sum(-r['amount'] for r in selected if r['amount'] < 0)
             stats[prefix + 'Refund'] = sum(r['amount'] for r in selected if r['amount'] > 0)
         report['feeSummary'].append(stats)
+    report['duplicateAmountChecks']=[{**c,'category':'普通记录'} for c in report['duplicateAmountChecks']]+[{**c,'category':'疑似手续费'} for c in fee_report['duplicateAmountChecks']]
     report['warnings'].extend(fee_report['warnings'])
     if options['separateFees']:
         for side in ('left', 'right'):
@@ -513,7 +527,7 @@ def reconcile_projects(payload):
         left, right = pairs[(a, b)]
         r['side'] = 'left' if r['project'] == a else 'right'
         (left if r['side'] == 'left' else right).append(r)
-    report = {key: [] for key in ('matched', 'differences', 'ambiguous', 'fees', 'feeSummary', 'totals', 'projectPairs', 'warnings', 'translationDifferences')}
+    report = {key: [] for key in ('matched', 'differences', 'ambiguous', 'fees', 'feeSummary', 'totals', 'projectPairs', 'warnings', 'translationDifferences','duplicateAmountChecks')}
     report.update(ledgerExcluded=ledger_excluded,unitDiscovery=sorted(internal_names),knownBooks=sorted(known_books),baseComparisonSkipped=0, invalid=invalid, importInventory=inventory, excludedPeriod=excluded_period, mode='projects', options=options, aliases=payload.get('aliases', {}), projects=sorted(projects),
                   counts={'left': 0, 'right': 0, 'files': len(datasets), 'projects': len(projects), 'rows': len(records) + len(invalid), 'excludedPeriod':len(excluded_period)})
     for (a, b), (left, right) in sorted(pairs.items()):
@@ -534,6 +548,7 @@ def reconcile_projects(payload):
                 if delta:
                     report['translationDifferences'].append({**entry, 'baseDelta':delta, 'baseCurrency':l['baseCurrency'],
                         'reason':'原币按规则一致；本币金额不同（可能为折算差异），不计入原币往来差异'})
+        report['duplicateAmountChecks'].extend({**c,'pair':f'{a} ↔ {b}','category':'项目往来'} for c in comparison['duplicateAmountChecks'])
         report['warnings'].extend(comparison['warnings'])
         report['counts']['left'] += len(left)
         report['counts']['right'] += len(right)

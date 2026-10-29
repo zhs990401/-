@@ -172,14 +172,16 @@ def export_report(report):
         for group, entry in enumerate(entries, 1):
             left = entry.get('leftRows') or ([entry['left']] if entry.get('left') else [])
             right = entry.get('rightRows') or ([entry['right']] if entry.get('right') else [])
-            for i in range(max(len(left), len(right))):
-                yield [group, entry.get('pair', ''), entry.get('reason', ''), entry.get('matchType', ''), entry.get('feeStatus', '')] + record_values(left[i] if i < len(left) else None) + record_values(right[i] if i < len(right) else None) + [format_cents(entry.get('delta')) if i == 0 else '', format_cents(entry.get('baseDelta')) if i == 0 else '', entry.get('baseCurrency','')]
+            members = [(r,None) for r in left] + [(None,r) for r in right] if entry.get('matchType')=='amount_count' else [(left[i] if i<len(left) else None,right[i] if i<len(right) else None) for i in range(max(len(left),len(right)))]
+            for i,(left_record,right_record) in enumerate(members):
+                yield [group, entry.get('pair', ''), entry.get('reason', ''), entry.get('matchType', ''), entry.get('feeStatus', '')] + record_values(left_record) + record_values(right_record) + [format_cents(entry.get('delta')) if i == 0 else '', format_cents(entry.get('baseDelta')) if i == 0 else '', entry.get('baseCurrency','')]
 
     for key, label in [('matched', '已匹配'), ('differences', '待核实差异'), ('ambiguous', '重复或组合冲突'), ('invalid', '无效数据'), ('fees', '疑似手续费明细'), ('translationDifferences', '本币金额差异'), ('ledgerExcluded','未纳入内部核对')]:
         add_sheet(label, ['本表配对组号', '项目组合', '说明', '配对类型', '手续费核对状态'] + ['左侧' + h for h in record_headers] + ['右侧' + h for h in record_headers] + ['组金额差额', '本币金额差额', '差额本币币种'], detail_rows(report.get(key, [])))
     add_sheet('项目往来汇总', ['项目A', '项目B', '币种', 'A方净发生额', 'B方净发生额', '反向核对差额', 'A方条数', 'B方条数', '待核实项', '未提供账簿项目', '状态','金额口径','本币金额差异项数'],
               ([p['projectA'], p['projectB'], p['currency'], format_cents(p['left']), format_cents(p['right']), format_cents(p['delta']), p['leftCount'], p['rightCount'], p['outstanding'], p['missingProject'], p['status'],'原币发生额',p.get('baseDifferenceCount',0)] for p in report.get('projectPairs', [])))
     fee_keys = ['leftCount', 'leftExpense', 'leftRefund', 'rightCount', 'rightExpense', 'rightRefund', 'delta', 'missingLeftCount', 'missingLeftExpense', 'missingLeftRefund', 'missingRightCount', 'missingRightExpense', 'missingRightRefund']
+    add_sheet('重复金额数量核对', ['项目组合','账户','分类','币种','对齐方向后单笔金额','原始左笔数','原始右笔数','余项左笔数','余项右笔数','数量差','日期规则','严格参考号分组','结论','说明'], ([c.get('pair',''),c.get('account',''),c.get('category',''),c['currency'],format_cents(c['amount']),c['originalLeftCount'],c['originalRightCount'],c['leftCount'],c['rightCount'],c['quantityDelta'],'无限制' if c['dateRule']=='unlimited' else str(c['dateRule']),c.get('reference',''),c['status'],c['reason']] for c in report.get('duplicateAmountChecks',[])))
     add_sheet('手续费汇总', ['币种', '左侧笔数', '左侧支出', '左侧退款', '右侧笔数', '右侧支出', '右侧退款', '规则调整后差额', '疑似左侧漏记笔数', '疑似左侧漏记支出', '疑似左侧漏记退款', '疑似右侧漏记笔数', '疑似右侧漏记支出', '疑似右侧漏记退款'],
               ([p['currency']] + [p[k] if k.endswith('Count') else format_cents(p[k]) for k in fee_keys] for p in report.get('feeSummary', [])))
     add_sheet('内部单位清单', ['内部单位','是否提供账簿'], ([name, '是' if name in report.get('knownBooks',[]) else '否'] for name in report.get('unitDiscovery',[])))

@@ -114,8 +114,12 @@ function addProject() {
   if(state.projects.length>=20){notice('最多添加 20 份文件。');return null;}
   const id='p'+state.nextId++;state.projects.push(id);return id;
 }
-function recordCells(record,components) {
+function recordCells(record,components,countOnly=false) {
   if(!record) return '<td>—</td><td>—</td><td class="numeric">—</td>';
+  if(countOnly){
+    const rows=components||[record];
+    return `<td><b>${rows.length} 笔 · 按金额数量匹配</b>${record.project?`<small>${esc(record.project)} → ${esc(record.counterparty)}</small>`:''}${record.account?`<small>${esc(record.account)}</small>`:''}<details class="count-members"><summary>查看全部来源行</summary>${rows.map(r=>`<div class="subrecord">${esc(r.source)}${r.sheet?' / '+esc(r.sheet):''}<small>第 ${esc(r.row)} 行 · ${esc(r.date)}</small></div>`).join('')}</details></td><td>组内未指定逐笔对应${record.baseAmount!==undefined&&record.baseAmount!==null?`<small>本币合计 ${esc(record.baseCurrency)} ${fmt(record.baseAmount)}</small>`:''}<details class="count-members"><summary>查看摘要与参考号</summary>${rows.map(r=>`<div class="subrecord">${esc(r.description)}<small>${esc(r.reference)||'无参考号'}</small></div>`).join('')}</details></td><td class="numeric"><b>合计 ${fmt(record.amount)}</b><small>${esc(record.currency)}</small><small>单笔 ${fmt(rows[0].amount)} × ${rows.length}</small></td>`;
+  }
   const rows=components || [record];
   return `<td>${rows.map(r=>`<div class="subrecord">${r.project?`<b>${esc(r.project)} → ${esc(r.counterparty)}</b><br>`:''}${esc(r.source)}${r.sheet?' / '+esc(r.sheet):''}<small>第 ${esc(r.row)} 行 · ${esc(r.date)}</small></div>`).join('')}</td><td>${rows.map(r=>`<div class="subrecord">${esc(r.description)||'—'}<small>${esc(r.reference)||'无参考号'}${r.account?' · '+esc(r.account):''}</small>${r.subjectCode||r.subjectName?`<small>${esc(r.subjectCode)} ${esc(r.subjectName)}</small>`:''}${r.baseAmount!==null&&r.baseAmount!==undefined?`<small>本币 ${esc(r.baseCurrency)} ${fmt(r.baseAmount)}</small>`:''}${r.baseError?`<small>${esc(r.baseError)}</small>`:''}</div>`).join('')}</td><td class="numeric">${rows.map(r=>`<div class="subrecord">${fmt(r.amount)}<small>${esc(r.currency)}</small></div>`).join('')}${rows.length>1?`<b>合计 ${fmt(record.amount)}</b>`:''}</td>`;
 }
@@ -133,9 +137,10 @@ function renderReport() {
   const report=state.report;if(!report)return;
   $('#results').classList.remove('hidden');
   const feePending=report.fees.filter(entry=>entry.feeStatus!=='matched').length;
+  const countGroups=(report.duplicateAmountChecks||[]).filter(c=>c.status==='matched').length;
   const clean=report.matched.length+report.fees.length>0 && !report.differences.length && !report.ambiguous.length && !report.invalid.length && !feePending;
-  $('#result-summary').textContent=(report.mode==='projects'?`${report.counts.files} 份文件 · ${report.counts.projects} 个本方项目 · ${report.counts.rows} 条明细。`:`左侧 ${report.counts.left} 条 · 右侧 ${report.counts.right} 条 · 银行账户：${report.accountScope||'未选择'}。`)+(clean?'所有有效明细均已按当前规则配对，请结合原始凭证确认。':'待核实项、重复候选及无效数据请逐项确认，合计相等不代表逐笔一致。');
-  const stats=[['matched','green','组普通记录配对（含组合）'],['differences','red','项普通记录待核实'],['ambiguous','amber','条普通记录需人工配对'],['invalid','','条未参与金额比较']];
+  $('#result-summary').textContent=(report.mode==='projects'?`${report.counts.files} 份文件 · ${report.counts.projects} 个本方项目 · ${report.counts.rows} 条明细。`:`左侧 ${report.counts.left} 条 · 右侧 ${report.counts.right} 条 · 银行账户：${report.accountScope||'未选择'}。`)+(clean?'所有有效明细均已按当前规则配对，请结合原始凭证确认。':'待核实项、重复候选及无效数据请逐项确认，合计相等不代表逐笔一致。')+(countGroups?` 含 ${countGroups} 组金额数量匹配，未指定组内逐笔对应关系。`:'');
+  const stats=[['matched','green','组记录匹配（含金额数量、拆分匹配）'],['differences','red','项普通记录待核实'],['ambiguous','amber','条普通记录需人工配对'],['invalid','','条未参与金额比较']];
   if(report.mode==='projects'&&report.ledgerExcluded?.length)stats.push(['ledgerExcluded','','汇总、待确认单位和零原币记录']);
   if(report.mode==='projects')stats.push(['translationDifferences','','项不影响原币匹配结论']);
   if(report.mode!=='projects')stats.push(['fees','amber',`${feePending} 项尚待核实，单独列示`]);
@@ -143,7 +148,7 @@ function renderReport() {
   $('#report-warnings').textContent=[...new Set(report.warnings)].join('\n');$('#report-warnings').classList.toggle('hidden',!report.warnings.length);
   $('#totals').classList.toggle('hidden',report.mode==='projects');
   $('#totals').innerHTML=report.totals.length?report.totals.map(t=>`<div class="total-line"><span>${esc(t.currency)} 全部有效明细净额（含手续费）</span><span>左侧 <b>${fmt(t.left)}</b></span><span>右侧 <b>${fmt(t.right)}</b></span><span>规则调整后差额 <b>${fmt(t.delta)}</b></span></div>`).join(''):'没有有效明细可计算合计，请检查无效数据。';
-  renderFeeSummary(report);renderProjectSummary(report);renderProjectFilter(report);renderUnitProjectOverview(report);
+  renderDuplicateCountSummary(report);renderFeeSummary(report);renderProjectSummary(report);renderProjectFilter(report);renderUnitProjectOverview(report);
   $('#tabs').innerHTML=Object.keys(tabNames).filter(key=>key==='fees'?report.mode!=='projects':(key==='translationDifferences'||key==='ledgerExcluded')?report.mode==='projects':true).map(key=>`<button data-tab="${key}" class="${state.tab===key?'active':''}">${tabNames[key]} ${(report[key]||[]).length}</button>`).join('');
   document.querySelectorAll('[data-tab]').forEach(el=>el.addEventListener('click',()=>{state.tab=el.dataset.tab;state.page=0;renderReport();}));renderRows();
 }
@@ -152,7 +157,7 @@ function renderRows() {
   const query=$('#search').value.trim().toLowerCase();
   const rows=projectFiltered(state.report[state.tab]||[]).filter(r=>JSON.stringify(r).toLowerCase().includes(query));
   const pages=Math.max(1,Math.ceil(rows.length/50));state.page=Math.min(state.page,pages-1);
-  $('#report-body').innerHTML=rows.slice(state.page*50,(state.page+1)*50).map(r=>`<tr><td class="reason">${r.pair?`<b>${esc(r.pair)}</b><br>`:''}${esc(r.reason)}${r.baseDelta!==undefined?`<small>${esc(r.baseCurrency)} 本币差额 ${fmt(r.baseDelta)}</small>`:''}${r.feeStatus?`<small>${({matched:'已按规则配对',differences:'手续费差异待核实',ambiguous:'手续费候选冲突'})[r.feeStatus]}</small>`:''}</td>${recordCells(r.left,r.leftRows)}${recordCells(r.right,r.rightRows)}<td class="numeric">${fmt(r.delta)}</td></tr>`).join('')||'<tr><td colspan="8" class="empty">当前分类没有记录</td></tr>';
+  $('#report-body').innerHTML=rows.slice(state.page*50,(state.page+1)*50).map(r=>`<tr><td class="reason">${r.pair?`<b>${esc(r.pair)}</b><br>`:''}${esc(r.reason)}${r.baseDelta!==undefined?`<small>${esc(r.baseCurrency)} 本币差额 ${fmt(r.baseDelta)}</small>`:''}${r.feeStatus?`<small>${({matched:'已按规则配对',differences:'手续费差异待核实',ambiguous:'手续费候选冲突'})[r.feeStatus]}</small>`:''}</td>${recordCells(r.left,r.leftRows,r.matchType==='amount_count')}${recordCells(r.right,r.rightRows,r.matchType==='amount_count')}<td class="numeric">${fmt(r.delta)}</td></tr>`).join('')||'<tr><td colspan="8" class="empty">当前分类没有记录</td></tr>';
   $('#page-info').textContent=`共 ${rows.length.toLocaleString()} 项 · 第 ${state.page+1} / ${pages} 页`;$('#prev').disabled=state.page===0;$('#next').disabled=state.page>=pages-1;
 }
 function getAliases() {
@@ -167,7 +172,7 @@ function getAliases() {
   }
   return result;
 }
-function options() { return {direction:$('#direction').value,days:$('#days').value==='unlimited'?'unlimited':Number($('#days').value),strictReference:$('#strictReference').checked,matchAccount:!isProjects(),accountScope:state.accountScope,oneToMany:$('#oneToMany').checked,maxParts:Number($('#maxParts').value),separateFees:!isProjects()&&$('#separateFees').checked,feeKeywords:$('#feeKeywords').value,...(isProjects()?{dateRangeMode:$('#project-date-range').value,startDate:$('#project-start').value,endDate:$('#project-end').value,additionalInternalUnits:$('#additional-internal-units').value.split('\n').map(n=>n.trim()).filter(Boolean)}:{})}; }
+function options() { return {direction:$('#direction').value,days:$('#days').value==='unlimited'?'unlimited':Number($('#days').value),strictReference:$('#strictReference').checked,matchAccount:!isProjects(),accountScope:state.accountScope,matchDuplicateCounts:$('#duplicate-counts').checked,oneToMany:$('#oneToMany').checked,maxParts:Number($('#maxParts').value),separateFees:!isProjects()&&$('#separateFees').checked,feeKeywords:$('#feeKeywords').value,...(isProjects()?{dateRangeMode:$('#project-date-range').value,startDate:$('#project-start').value,endDate:$('#project-end').value,additionalInternalUnits:$('#additional-internal-units').value.split('\n').map(n=>n.trim()).filter(Boolean)}:{})}; }
 $('#run').addEventListener('click',async()=>{
   if(state.busy)return;
   state.busy=true;$('#run').disabled=true;$('#run').textContent='正在核对…';notice();
@@ -183,7 +188,7 @@ $('#run').addEventListener('click',async()=>{
 });
 $('#accountScope').addEventListener('change',()=>{state.accountScope=$('#accountScope').value;invalidate();});
 $('#workflow').addEventListener('change',()=>{invalidate();renderUploads();});
-['#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end','#project-date-range','#additional-internal-units'].forEach(id=>$(id).addEventListener('input',invalidate));
+['#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#duplicate-counts','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end','#project-date-range','#additional-internal-units'].forEach(id=>$(id).addEventListener('input',invalidate));
 $('#add-project').addEventListener('click',()=>{if(state.busy)return;if(addProject()){invalidate();renderUploads();}});
 $('#project-batch').addEventListener('change',async event=>{
   const files=[...event.target.files];
@@ -208,12 +213,13 @@ $('#export').addEventListener('click',()=>{
   const lines=[['分类','组号','项目组合','说明','配对类型','手续费核对状态',...columns.map(c=>'左侧'+c),...columns.map(c=>'右侧'+c),'组金额差额','本币金额差额','差额本币币种','方向规则','日期容差天数','严格参考号','按账户核对','一笔对多笔上限']];
   for(const [key,label] of Object.entries(tabNames))(report[key]||[]).forEach((entry,index)=>{
     const left=entry.leftRows || (entry.left?[entry.left]:[]), right=entry.rightRows || (entry.right?[entry.right]:[]);
-    for(let row=0;row<Math.max(left.length,right.length);row++)lines.push([label,index+1,entry.pair||'',entry.reason,entry.matchType||'',entry.feeStatus||'',...values(left[row]),...values(right[row]),row===0&&entry.delta!==undefined?(entry.delta/100).toFixed(2):'',row===0&&entry.baseDelta!==undefined?(entry.baseDelta/100).toFixed(2):'',entry.baseCurrency||'',report.options.direction==='same'?'同向':'反向',report.options.days,report.options.strictReference?'是':'否',report.options.matchAccount?'是':'否',report.options.oneToMany?report.options.maxParts:'未启用']);
+    const members=entry.matchType==='amount_count'?[...left.map(r=>[r,null]),...right.map(r=>[null,r])]:Array.from({length:Math.max(left.length,right.length)},(_,i)=>[left[i],right[i]]);
+    for(let row=0;row<members.length;row++)lines.push([label,index+1,entry.pair||'',entry.reason,entry.matchType||'',entry.feeStatus||'',...values(members[row][0]),...values(members[row][1]),row===0&&entry.delta!==undefined?(entry.delta/100).toFixed(2):'',row===0&&entry.baseDelta!==undefined?(entry.baseDelta/100).toFixed(2):'',entry.baseCurrency||'',report.options.direction==='same'?'同向':'反向',report.options.days,report.options.strictReference?'是':'否',report.options.matchAccount?'是':'否',report.options.oneToMany?report.options.maxParts:'未启用']);
   });
   download(new Blob(['\uFEFF'+lines.map(line=>line.map(safe).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8;'}),`核对明细_${new Date().toISOString().slice(0,10)}.csv`);
 });
 function demoDataset(id,name,headers,rows,projectName='') {state.datasets[id]={id,name,headers,rows,firstRow:2,sheets:[],sheet:'',warnings:[],mapping:projectName?inferProject(headers):infer(headers),originalConfirmed:!!projectName,currencyName:projectName?'CNY':''};delete state.files[id];if(projectName)state.projectNames[id]=projectName;}
-function resetDemoOptions() {$('#days').value='0';$('#strictReference').checked=false;$('#matchAccount').checked=false;$('#oneToMany').checked=true;$('#maxParts').value='5';$('#separateFees').checked=true;$('#aliases').value='';$('#project-start').value='';$('#project-end').value='';$('#project-date-range').value='unlimited';$('#additional-internal-units').value='';}
+function resetDemoOptions() {$('#days').value='0';$('#strictReference').checked=false;$('#matchAccount').checked=false;$('#oneToMany').checked=true;$('#duplicate-counts').checked=true;$('#maxParts').value='5';$('#separateFees').checked=true;$('#aliases').value='';$('#project-start').value='';$('#project-end').value='';$('#project-date-range').value='unlimited';$('#additional-internal-units').value='';}
 $('#demo').addEventListener('click',()=>{
   if(state.busy)return;
   const headers=['日期','摘要','借方金额','贷方金额','参考号'];
@@ -232,7 +238,7 @@ $('#project-demo').addEventListener('click',()=>{
   demoDataset('p3','项目C.xlsx',headers,[['2026-01-06','项目A','收到A项目','USD','','490','CNY','','3528','AC1','2241','其他应付款'],['2026-01-08','项目B','收到B项目','USD','','200','CNY','','1440','C2','2241','其他应付款']],'项目C');
   resetDemoOptions();$('#direction').value='reverse';invalidate();renderUploads();notice('虚构多项目示例：A↔B 原币 USD 1000 对 600＋400 一致，本币相差 CNY 100；A↔C 原币差 USD 10，缺少 D 项目账簿。点击「开始核对」。');
 });
-const RULE_IDS = ['#workflow','#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end','#project-date-range','#additional-internal-units'];
+const RULE_IDS = ['#workflow','#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#duplicate-counts','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end','#project-date-range','#additional-internal-units'];
 function saveView() {
   if(!state.activeModule||state.activeModule==='cashflow')return;
   const controls={};
@@ -354,4 +360,11 @@ function renderUnitProjectOverview(report){
  const rows=(report.unitOverview||[]).filter(r=>(!state.projectFilters.project||r.project===state.projectFilters.project)&&(!state.projectFilters.currency||r.currency===state.projectFilters.currency));
  area.innerHTML=`<div class="panel-heading"><div><h2>按项目列示核对结果</h2><p>每个项目按原币币种独立列示，原币差额 = 本方发生净额 + 对方账簿对应净额。各项目差额含同一往来的双方视角，不应再相加作为总差额。</p></div></div><div class="table-wrap"><table class="summary-table"><thead><tr><th>项目 / 内部单位</th><th>原币</th><th>本方明细</th><th>已匹配笔数</th><th>待核实记录</th><th class="numeric">本方发生净额</th><th class="numeric">对方对应净额</th><th class="numeric">原币差额</th><th>状态</th></tr></thead><tbody>${rows.map(r=>`<tr><td><button class="project-link" data-open-unit="${esc(r.project)}">${esc(r.project)}</button></td><td>${esc(r.currency)||'无有效明细'}</td><td>${r.count}</td><td>${r.matchedCount}</td><td>${r.pendingCount}</td><td class="numeric">${fmt(r.ownAmount)}</td><td class="numeric">${fmt(r.reciprocalAmount)}</td><td class="numeric">${fmt(r.delta)}</td><td>${esc(r.status)}</td></tr>`).join('')||'<tr><td colspan="9" class="empty">当前筛选无项目</td></tr>'}</tbody></table></div>`;
  area.querySelectorAll('[data-open-unit]').forEach(el=>el.addEventListener('click',()=>{state.projectFilters.project=el.dataset.openUnit;state.projectFilters.pair='';state.tab='differences';state.page=0;renderReport();$('.report-panel').scrollIntoView({behavior:'smooth'});}));
+}
+
+function renderDuplicateCountSummary(report){
+ const checks=(report.duplicateAmountChecks||[]).filter(c=>(!state.projectFilters?.pair||report.mode!=='projects'||c.pair===state.projectFilters.pair)&&(!state.projectFilters?.currency||report.mode!=='projects'||c.currency===state.projectFilters.currency)&&(!state.projectFilters?.project||report.mode!=='projects'||(c.pair||'').split(' ↔ ').includes(state.projectFilters.project)));
+ const area=$('#duplicate-count-summary');area.classList.toggle('hidden',!checks.length);if(!checks.length)return;
+ const labels={matched:'金额及数量一致，按组匹配',quantity_mismatch:'数量不一致，人工复核',conditions_not_met:'数量一致，日期/参考号条件待核实'};
+ area.innerHTML=`<div class="panel-heading"><div><h2>重复金额数量核对</h2><p>先保留已确定的一对一关系，再核对同一项目组合、币种、方向和账户下的重复金额。余项数量一致且满足所选日期、严格参考号规则时按组标记，不指定逐笔对应。</p></div></div><div class="table-wrap"><table class="summary-table"><thead><tr><th>项目组合 / 账户</th><th>分类 / 原币</th><th class="numeric">对齐方向后的单笔金额</th><th>原始左 / 右笔数</th><th>余项左 / 右笔数</th><th>余项数量差</th><th>日期 / 参考号规则</th><th>结论</th></tr></thead><tbody>${checks.map(c=>`<tr><td>${esc(c.pair||c.account||report.accountScope||'当前范围')}</td><td>${esc(c.category)}<small>${esc(c.currency)}</small></td><td class="numeric">${fmt(c.amount)}</td><td>${c.originalLeftCount} / ${c.originalRightCount}</td><td>${c.leftCount} / ${c.rightCount}</td><td>${c.quantityDelta}</td><td>${c.dateRule==='unlimited'?'无限制':c.dateRule+' 天'}<small>${c.reference?'参考号 '+esc(c.reference):report.options.strictReference?'严格参考号为空':'未强制参考号相同'}</small></td><td>${labels[c.status]}<small>${esc(c.reason)}</small></td></tr>`).join('')}</tbody></table></div>`;
 }
