@@ -36,6 +36,9 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
     page.goto(os.environ.get('TEST_BASE_URL', 'http://127.0.0.1:8000'))
     expect(page.locator('.brand-name')).to_have_text('中国港湾账目核对平台')
     expect(page.locator('#nav-bank')).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#bankbatch-workspace')).to_be_visible()
+    page.locator('#bank-format-options summary').click()
+    page.locator('#bank-manual-open').click()
     expect(page.locator('#feature-title')).to_have_text('银行资金内外账核对')
     expect(page.locator('#project-demo')).to_be_hidden()
     page.locator('#demo').click()
@@ -253,6 +256,9 @@ with sync_playwright() as p, tempfile.TemporaryDirectory(prefix='reconcile-brows
 
     # Bank reconciliation is constrained to one explicit account, including report totals.
     page.locator('#nav-bank').click()
+    expect(page.locator('#bankbatch-workspace')).to_be_visible()
+    page.locator('#bank-format-options summary').click()
+    page.locator('#bank-manual-open').click()
     bank_headers=['日期','账户','收入金额','支出金额','流水号']
     one=xlsx(bank_headers,[[datetime(2026,1,1),'BANK-A',100,None,'A1'],[datetime(2026,1,2),'BANK-B',20,None,'B1']])
     two=xlsx(bank_headers,[[datetime(2026,1,1),'BANK-A',90,None,'A1'],[datetime(2026,1,2),'BANK-B',20,None,'B1']])

@@ -1,6 +1,6 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
-const state = {datasets: {left: null, right: null}, files: {}, projects: ['p1','p2'], projectNames: {}, accountNames: {}, accountScope: '', nextId: 3, report: null, tab: 'differences', page: 0, busy: false, revision: 0, activeModule: null, projectFilters:{pair:'',currency:'',project:''}, views: {bank: {}, projects: {}}};
+const state = {datasets: {left: null, right: null}, files: {}, projects: ['p1','p2'], projectNames: {}, accountNames: {}, accountScope: '', nextId: 3, report: null, tab: 'differences', page: 0, busy: false, revision: 0, activeModule: null, bankManual: false, projectFilters:{pair:'',currency:'',project:''}, views: {bank: {}, projects: {}}};
 const fields = {date:'日期 *', debit:'借方 / 收入金额', credit:'贷方 / 支出金额', amount:'带正负号的金额 *', reference:'参考号（凭证号 / 流水号）', description:'摘要（手续费识别依据）', currency:'币种（未选默认 CNY）', account:'账户', project:'本方项目列（可选，优先于填写名称）', counterparty:'对方项目列 *'};
 const tabNames = {differences:'待核实差异', ambiguous:'重复 / 冲突', invalid:'无效数据', matched:'已匹配', fees:'疑似手续费',translationDifferences:'本币金额差异',ledgerExcluded:'未纳入记录'};
 const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -249,23 +249,27 @@ $('#project-demo').addEventListener('click',()=>{
 });
 const RULE_IDS = ['#workflow','#direction','#days','#strictReference','#matchAccount','#accountScope','#oneToMany','#duplicate-counts','#maxParts','#separateFees','#feeKeywords','#aliases','#project-start','#project-end','#project-date-range','#additional-internal-units'];
 function saveView() {
-  if(!state.activeModule||['cashflow','bankbatch'].includes(state.activeModule))return;
+  if(!state.activeModule||state.activeModule==='cashflow'||(state.activeModule==='bank'&&!state.bankManual))return;
   const controls={};
   for(const id of RULE_IDS){const el=$(id);controls[id]=el.type==='checkbox'?el.checked:el.value;}
   state.views[state.activeModule]={controls,report:state.report,tab:state.tab,page:state.page,search:$('#search').value,notice:$('#notice').textContent};
 }
 function activateModule(module, updateAddress=false) {
-  if(!['bank','projects','cashflow','bankbatch'].includes(module))module='bank';
+  if(module==='bankbatch'){module='bank';history.replaceState(null,'','#bank');}
+  if(!['bank','projects','cashflow'].includes(module))module='bank';
   if(module===state.activeModule)return true;
   if(state.busy||window.CashflowUI?.busy||window.BankBatchUI?.busy){notice('正在处理明细，请稍候再切换功能。');return false;}
   saveView();state.revision++;state.activeModule=module;
-  const cash=module==='cashflow',batch=module==='bankbatch';
+  const cash=module==='cashflow',batch=module==='bank'&&!state.bankManual;
+  $('#bank-format-options').classList.toggle('hidden',module!=='bank');
+  $('#bank-manual-open').classList.toggle('hidden',state.bankManual);
+  $('#bank-batch-open').classList.toggle('hidden',!state.bankManual);
   $('#bankbatch-workspace').classList.toggle('hidden',!batch);
   $('#reconciliation-workspace').classList.toggle('hidden',cash||batch);$('#cashflow-workspace').classList.toggle('hidden',!cash);$('#cashflow-demo').classList.toggle('hidden',!cash);
   if(batch){
-    const title='银行多账户批量核对';$('#feature-title').textContent=title;$('#breadcrumb-title').textContent=title;$('#feature-eyebrow').textContent='MULTI-ACCOUNT BANK RECONCILIATION';$('#feature-description').textContent='批量读取内账账户与外账全部Sheet，先核对期初、期末，手续费和透支利息按账户单独列示。';document.title=title+' · 中国港湾账目核对平台';$('#demo').classList.add('hidden');$('#project-demo').classList.add('hidden');
+    const title='银行资金内外账核对';$('#feature-title').textContent=title;$('#breadcrumb-title').textContent=title;$('#feature-eyebrow').textContent='MULTI-ACCOUNT BANK RECONCILIATION';$('#feature-description').textContent='批量读取内账账户与外账全部Sheet，先核对期初、期末，手续费和透支利息按账户单独列示。';document.title=title+' · 中国港湾账目核对平台';$('#demo').classList.add('hidden');$('#project-demo').classList.add('hidden');
     for(const el of document.querySelectorAll('[data-module]')){const active=el.dataset.module===module;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');}
-    if(updateAddress)history.pushState(null,'','#bankbatch');window.scrollTo({top:0,behavior:'instant'});return true;
+    if(updateAddress)history.pushState(null,'','#bank');window.scrollTo({top:0,behavior:'instant'});return true;
   }
   if(cash){
     $('#feature-title').textContent='项目现金流统计';$('#breadcrumb-title').textContent='项目现金流统计';$('#feature-eyebrow').textContent='PROJECT CASH FLOW';$('#feature-description').textContent='按 project 列归属项目，从手工期初情况出发，逐月汇总银行收入、支出与余额。';document.title='项目现金流统计 · 中国港湾账目核对平台';
@@ -292,6 +296,12 @@ function activateModule(module, updateAddress=false) {
   window.scrollTo({top:0,behavior:'instant'});
   return true;
 }
+function setBankManual(manual) {
+  if(state.busy||window.CashflowUI?.busy||window.BankBatchUI?.busy)return;
+  saveView();state.bankManual=manual;state.activeModule=null;activateModule('bank',true);
+}
+$('#bank-manual-open').addEventListener('click',()=>setBankManual(true));
+$('#bank-batch-open').addEventListener('click',()=>setBankManual(false));
 for(const el of document.querySelectorAll('[data-module],.brand'))el.addEventListener('click',event=>{event.preventDefault();activateModule(el.dataset.module||'bank',true);});
 window.addEventListener('hashchange',()=>{if(!activateModule(location.hash.slice(1)))history.replaceState(null,'','#'+state.activeModule);});
 activateModule(['#projects','#cashflow','#bankbatch'].includes(location.hash)?location.hash.slice(1):'bank');
